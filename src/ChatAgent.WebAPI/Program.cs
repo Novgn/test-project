@@ -67,6 +67,7 @@ if (string.IsNullOrEmpty(endpoint) || string.IsNullOrEmpty(deploymentName) || st
 
 kernelBuilder.Services.AddAzureOpenAIChatCompletion(
     deploymentName: deploymentName,
+    modelId: "gpt-4",
     endpoint: endpoint,
     apiKey: apiKey);
 // }

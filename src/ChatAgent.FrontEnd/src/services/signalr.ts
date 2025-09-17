@@ -17,7 +17,8 @@ const HUB_URL = import.meta.env.VITE_API_BASE_URL || 'https://localhost:7248';
 class SignalRService {
   private connection: signalR.HubConnection | null = null;
   private isConnected = false;
-  private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private currentSessionId: string | undefined = undefined;
 
   /**
    * Event handlers for different message types
@@ -33,15 +34,24 @@ class SignalRService {
 
   /**
    * Initialize SignalR connection
+   * @param sessionId - Optional session ID to use for the connection
    */
-  async connect(): Promise<void> {
+  async connect(sessionId?: string): Promise<void> {
     if (this.connection) {
       await this.disconnect();
     }
 
+    // Store session ID for reconnection
+    this.currentSessionId = sessionId;
+
+    // Build URL with optional session ID
+    const url = sessionId
+      ? `${HUB_URL}/chathub?sessionId=${sessionId}`
+      : `${HUB_URL}/chathub`;
+
     // Create new connection with automatic reconnection
     this.connection = new signalR.HubConnectionBuilder()
-      .withUrl(`${HUB_URL}/chathub`)
+      .withUrl(url)
       .withAutomaticReconnect({
         nextRetryDelayInMilliseconds: (retryContext) => {
           // Exponential backoff: 0, 2, 4, 8, 16, 30 seconds
@@ -119,7 +129,7 @@ class SignalRService {
     });
 
     // Handle Processing event
-    this.connection.on('Processing', (data: any) => {
+    this.connection.on('Processing', (_data: any) => {
       console.log('Processing message...');
     });
 
@@ -155,14 +165,26 @@ class SignalRService {
     }
 
     this.reconnectTimer = setTimeout(async () => {
-      console.log('Attempting to reconnect...');
+      console.log('Attempting to reconnect with session:', this.currentSessionId);
       try {
-        await this.connect();
+        await this.connect(this.currentSessionId);
       } catch (error) {
         console.error('Reconnection failed:', error);
         this.scheduleReconnect();
       }
     }, 5000); // Retry after 5 seconds
+  }
+
+  /**
+   * Set the session ID for the current connection
+   */
+  async setSessionId(sessionId: string): Promise<void> {
+    if (!this.connection || !this.isConnected) {
+      throw new Error('SignalR is not connected');
+    }
+
+    await this.connection.invoke('SetSessionId', sessionId);
+    console.log('Session ID set:', sessionId);
   }
 
   /**

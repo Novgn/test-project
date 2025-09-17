@@ -18,7 +18,11 @@ public class ChatHub : Hub
 
     public override async Task OnConnectedAsync()
     {
-        var sessionId = Guid.NewGuid().ToString();
+        // Try to get sessionId from query string, otherwise generate new one
+        var httpContext = Context.GetHttpContext();
+        var sessionId = httpContext?.Request.Query["sessionId"].FirstOrDefault()
+                       ?? Guid.NewGuid().ToString();
+
         _connectionToSession[Context.ConnectionId] = sessionId;
 
         await Clients.Caller.SendAsync("Connected", new
@@ -52,6 +56,36 @@ public class ChatHub : Hub
         await base.OnDisconnectedAsync(exception);
     }
 
+    public async Task SetSessionId(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            await Clients.Caller.SendAsync("Error", "Session ID cannot be empty.");
+            return;
+        }
+
+        // Update the connection-to-session mapping
+        _connectionToSession[Context.ConnectionId] = sessionId;
+
+        _logger.LogInformation("Client {ConnectionId} set session to {SessionId}",
+            Context.ConnectionId, sessionId);
+
+        // Verify the conversation exists or create it
+        var conversation = await _orchestrator.GetConversationAsync(sessionId);
+        if (conversation == null)
+        {
+            _logger.LogInformation("Creating conversation for session {SessionId}", sessionId);
+            // The orchestrator will create it on first message
+        }
+
+        await Clients.Caller.SendAsync("SessionUpdated", new
+        {
+            sessionId,
+            connectionId = Context.ConnectionId,
+            timestamp = DateTime.UtcNow
+        });
+    }
+
     public async Task SendMessage(string message)
     {
         if (!_connectionToSession.TryGetValue(Context.ConnectionId, out var sessionId))
@@ -75,7 +109,7 @@ public class ChatHub : Hub
 
             await Clients.Caller.SendAsync("ReceiveMessage", new
             {
-                message = response.Content,
+                content = response.Content,  // Changed from 'message' to 'content'
                 role = response.Role,
                 agentId = response.AgentId,
                 timestamp = response.Timestamp,

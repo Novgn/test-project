@@ -91,8 +91,8 @@ export const Chat: React.FC = () => {
       signalRService.on('connected', () => setIsConnected(true));
       signalRService.on('disconnected', () => setIsConnected(false));
 
-      // Connect to SignalR (session managed on server side)
-      await signalRService.connect();
+      // Connect to SignalR with the session ID
+      await signalRService.connect(sessionId);
     } catch (error) {
       console.error('SignalR setup failed:', error);
     }

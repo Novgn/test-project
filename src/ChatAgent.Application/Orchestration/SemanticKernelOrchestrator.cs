@@ -1,7 +1,5 @@
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Agents;
-using Microsoft.SemanticKernel.Agents.Orchestration;
-using Microsoft.SemanticKernel.Agents.Orchestration.Sequential;
 using Microsoft.SemanticKernel.Agents.Runtime.InProcess;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.Extensions.Logging;
@@ -15,7 +13,6 @@ using DomainChatMessage = Domain.Entities.ChatMessage;
 using DomainConversation = Domain.Entities.Conversation;
 using DomainAgentType = Domain.Entities.AgentType;
 
-#pragma warning disable SKEXP0110 // Type is for evaluation purposes only and is subject to change or removal in future updates
 
 /// <summary>
 /// The main orchestrator for the chat agent system using Microsoft Semantic Kernel.
@@ -63,9 +60,9 @@ public class SemanticKernelOrchestrator : IOrchestrator
     // MCP tool providers from dependency injection
     private readonly IEnumerable<IMcpToolProvider>? _mcpToolProviders;
 
-    // Orchestration configurations
-    private SequentialOrchestration? _mainOrchestration;                            // Main path using all agents
-    private readonly Dictionary<string, SequentialOrchestration> _specializedOrchestrations = []; // Specialized paths
+    // NOTE: We're NOT using Semantic Kernel's SequentialOrchestration due to a bug in version 1.65.0
+    // where agents don't execute properly within the orchestration pipeline, causing timeouts.
+    // Instead, we use manual orchestration by directly invoking agents (see OrchestrateWithAgentsAsync).
 
     /// <summary>
     /// Initializes the orchestrator with the provided kernel and MCP tool providers.
@@ -104,12 +101,25 @@ public class SemanticKernelOrchestrator : IOrchestrator
             InitializeDefaultAgents();
         }
 
-        // Create the orchestration paths after agents are initialized
-        InitializeOrchestrations();
+        // DISABLED: Sequential Orchestration is not working in Semantic Kernel 1.65.0
+        // Agents timeout when used in orchestration pipelines
+        // We use manual orchestration instead (see OrchestrateWithAgentsAsync)
+        // InitializeOrchestrations();
 
-        // Start the runtime asynchronously
+        // Start the runtime synchronously to ensure it's ready before orchestrations
         // The runtime needs to be running before we can execute orchestrations
-        Task.Run(async () => await _runtime.StartAsync());
+        try
+        {
+            _runtime.StartAsync().GetAwaiter().GetResult();
+            // Wait for the runtime to be fully initialized
+            _runtime.RunUntilIdleAsync().GetAwaiter().GetResult();
+            _logger.LogInformation("InProcessRuntime started successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to start InProcessRuntime");
+            throw;
+        }
     }
 
     /// <summary>
@@ -153,6 +163,19 @@ public class SemanticKernelOrchestrator : IOrchestrator
         // The coordinator analyzes requests but doesn't execute tools directly
         // It determines which specialized agents should handle the request
         var coordinatorKernel = _kernel.Clone();
+
+        // Verify the kernel has chat completion service
+        try
+        {
+            var chatService = coordinatorKernel.GetRequiredService<IChatCompletionService>();
+            _logger.LogDebug("Coordinator kernel has chat service: {ServiceType}", chatService.GetType().Name);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get chat service from kernel. Check Azure OpenAI configuration.");
+            throw new InvalidOperationException("Chat service not found in kernel. Check your Azure OpenAI configuration.", ex);
+        }
+
         _agents["coordinator"] = new ChatCompletionAgent
         {
             Name = "Coordinator",
@@ -267,6 +290,19 @@ public class SemanticKernelOrchestrator : IOrchestrator
         };
 
         _logger.LogInformation("Initialized coordinator with specialized sub-agents");
+
+        // Validate all agents have kernels
+        foreach (var (name, agent) in _agents)
+        {
+            if (agent.Kernel == null)
+            {
+                _logger.LogError("Agent {AgentName} has null kernel!", name);
+            }
+            else
+            {
+                _logger.LogDebug("Agent {AgentName} initialized with kernel", name);
+            }
+        }
     }
 
     /// <summary>
@@ -311,6 +347,8 @@ public class SemanticKernelOrchestrator : IOrchestrator
             Instructions = "You are a synthesis agent that combines results.",
             Kernel = kernel.Clone()
         };
+
+        _logger.LogInformation("Initialized default agents without MCP tools");
     }
 
     /// <summary>
@@ -332,90 +370,10 @@ public class SemanticKernelOrchestrator : IOrchestrator
     /// Each path uses SequentialOrchestration to ensure agents run in order.
     /// ResponseCallbacks allow us to track intermediate outputs for debugging.
     /// </summary>
-    private void InitializeOrchestrations()
-    {
-        // ===== Create Specialized Orchestration Paths =====
-        // Each path is optimized for a specific type of request
+    // REMOVED: InitializeOrchestrations() method
+    // This method created SequentialOrchestration objects but they don't work in SK 1.65.0
+    // We use manual orchestration instead (see OrchestrateWithAgentsAsync)
 
-        // File operation path: Coordinator → FileAgent → Synthesizer
-        // Used when the request involves file system operations
-        if (_agents.ContainsKey("fileAgent"))
-        {
-            _specializedOrchestrations["file"] = new SequentialOrchestration(
-                _agents["coordinator"],    // First: Analyze the request
-                _agents["fileAgent"],       // Second: Execute file operations
-                _agents["synthesizer"]      // Third: Format the response
-            )
-            {
-                // Add callback to track agent outputs during execution
-                ResponseCallback = CreateResponseCallback("File Path")
-            };
-        }
-
-        // Web operation path: Coordinator → WebAgent → Synthesizer
-        // Used when the request involves web searches or browsing
-        if (_agents.ContainsKey("webAgent"))
-        {
-            _specializedOrchestrations["web"] = new SequentialOrchestration(
-                _agents["coordinator"],    // First: Analyze the request
-                _agents["webAgent"],        // Second: Execute web operations
-                _agents["synthesizer"]      // Third: Format the response
-            )
-            {
-                ResponseCallback = CreateResponseCallback("Web Path")
-            };
-        }
-
-        // Data operation path: Coordinator → DataAgent → Synthesizer
-        // Used when the request involves data processing or APIs
-        if (_agents.ContainsKey("dataAgent"))
-        {
-            _specializedOrchestrations["data"] = new SequentialOrchestration(
-                _agents["coordinator"],    // First: Analyze the request
-                _agents["dataAgent"],       // Second: Execute data operations
-                _agents["synthesizer"]      // Third: Format the response
-            )
-            {
-                ResponseCallback = CreateResponseCallback("Data Path")
-            };
-        }
-
-        // ===== Create Main Orchestration Path =====
-        // This path uses ALL agents and is used for complex requests
-        // that might need multiple capabilities
-        _mainOrchestration = new SequentialOrchestration(
-            _agents["coordinator"],    // First: Analyze and plan
-            _agents["fileAgent"],       // Second: File operations (if needed)
-            _agents["webAgent"],        // Third: Web operations (if needed)
-            _agents["dataAgent"],       // Fourth: Data operations (if needed)
-            _agents["synthesizer"]      // Fifth: Combine all outputs
-        )
-        {
-            ResponseCallback = CreateResponseCallback("Main Path")
-        };
-
-        _logger.LogInformation("Initialized {Count} orchestration paths", _specializedOrchestrations.Count + 1);
-    }
-
-    /// <summary>
-    /// Creates a response callback function for tracking agent outputs.
-    /// This callback is invoked after each agent in the sequence completes.
-    /// Useful for debugging and understanding the orchestration flow.
-    /// </summary>
-    /// <param name="pathName">Name of the orchestration path for logging</param>
-    /// <returns>A callback function that logs agent responses</returns>
-    private OrchestrationResponseCallback CreateResponseCallback(string pathName)
-    {
-        return (ChatMessageContent response) =>
-        {
-            // Log each agent's response as it completes
-            _logger.LogDebug("[{Path}] Agent {AgentName}: {Content}",
-                pathName,
-                response.AuthorName ?? "Unknown",
-                response.Content);
-            return ValueTask.CompletedTask;
-        };
-    }
 
     /// <summary>
     /// Main entry point for processing user messages.
@@ -468,65 +426,86 @@ public class SemanticKernelOrchestrator : IOrchestrator
     /// The orchestration is fully managed by Semantic Kernel's runtime,
     /// ensuring proper agent sequencing and state management.
     /// </summary>
+    /// <summary>
+    /// CURRENT IMPLEMENTATION: Manual Agent Orchestration (Workaround)
+    ///
+    /// This method implements a manual orchestration pattern instead of using Semantic Kernel's
+    /// SequentialOrchestration due to a critical bug in SK 1.65.0 where agents don't execute
+    /// properly in orchestration pipelines.
+    ///
+    /// WORKFLOW:
+    /// 1. Directly invoke the Coordinator agent to analyze the user's request
+    /// 2. [TODO] Parse coordinator's response to determine which specialized agent to use
+    /// 3. [TODO] Route to FileAgent, WebAgent, or DataAgent based on the analysis
+    /// 4. [TODO] Pass results to Synthesizer agent for final response formatting
+    ///
+    /// CURRENT LIMITATIONS:
+    /// - Only uses the Coordinator agent (no routing to specialized agents yet)
+    /// - No multi-agent collaboration (each agent works in isolation)
+    /// - No state sharing between agents
+    ///
+    /// FUTURE IMPROVEMENTS:
+    /// - Implement intelligent routing based on coordinator's analysis
+    /// - Add parallel agent execution for complex queries
+    /// - Implement agent result aggregation
+    /// - Add retry logic for failed agent invocations
+    /// </summary>
     private async Task<OrchestrationResult> OrchestrateWithAgentsAsync(
         string message,
         DomainConversation conversation,
         CancellationToken cancellationToken)
     {
+        // WORKAROUND: Manual orchestration because SequentialOrchestration times out in SK 1.65.0
+        // This bypasses the SK orchestration runtime entirely and calls agents directly
         try
         {
-            // Build the conversation history for context
+            // Build conversation history (currently unused but available for context-aware responses)
             var chatHistory = BuildChatHistoryWithContext(conversation, message);
 
-            // Intelligently determine which orchestration path to use
-            // This could be enhanced with more sophisticated routing logic
-            var orchestrationPath = await DetermineOrchestrationPath(message, cancellationToken);
+            _logger.LogDebug("Using manual orchestration (SequentialOrchestration has issues)");
 
-            _logger.LogDebug("Using orchestration path: {Path}", orchestrationPath);
+            // ===== STEP 1: COORDINATOR AGENT =====
+            // The coordinator analyzes the user's intent and determines required capabilities
+            var coordinatorMessage = new ChatMessageContent(AuthorRole.User, message);
+            ChatMessageContent? coordinatorResponse = null;
 
-            // Select the appropriate orchestration based on the determined path
-            SequentialOrchestration orchestration;
-            if (orchestrationPath != "main" &&
-                _specializedOrchestrations.TryGetValue(orchestrationPath, out var specializedOrch))
+            // Invoke coordinator agent directly using SK's agent API
+            await foreach (var item in _agents["coordinator"].InvokeAsync(coordinatorMessage))
             {
-                // Use a specialized path for targeted operations
-                orchestration = specializedOrch;
-            }
-            else
-            {
-                // Use the main path for complex requests or as fallback
-                orchestration = _mainOrchestration ?? _specializedOrchestrations.Values.First();
+                coordinatorResponse = item;
+                _logger.LogDebug("Coordinator: {Content}", coordinatorResponse?.Content);
+                break; // Take only the first response (agents can stream multiple messages)
             }
 
-            // Prepare the context message with conversation history
-            // This ensures agents have access to previous context
-            var contextMessage = $@"Previous conversation:
-{string.Join("\n", chatHistory.Select(m => $"{m.Role}: {m.Content}"))}
+            // ===== STEP 2: SPECIALIZED AGENT ROUTING (NOT IMPLEMENTED) =====
+            // TODO: Parse coordinator response to determine which agent to use:
+            // - If file operations detected → Route to FileAgent
+            // - If web search needed → Route to WebAgent
+            // - If data processing required → Route to DataAgent
+            // Example pseudo-code:
+            // if (coordinatorResponse.Content.Contains("file")) {
+            //     var fileAgentResponse = await InvokeFileAgent(message);
+            //     // Process file agent response...
+            // }
 
-Current request: {message}";
+            // ===== STEP 3: SYNTHESIZER AGENT (NOT IMPLEMENTED) =====
+            // TODO: Pass all agent responses to synthesizer for final formatting
+            // The synthesizer would combine multiple agent outputs into a coherent response
 
-            // Execute the orchestration using Semantic Kernel's runtime
-            // This handles all agent sequencing and communication
-            var orchestrationResult = await orchestration.InvokeAsync(
-                contextMessage,
-                _runtime,
-                cancellationToken);
-
-            // Extract the final synthesized response
-            // The timeout ensures we don't wait indefinitely
-            var finalResponse = await orchestrationResult.GetValueAsync(TimeSpan.FromSeconds(30));
+            // ===== CURRENT IMPLEMENTATION: Return Coordinator's Response Directly =====
+            var finalResponse = coordinatorResponse?.Content ?? "I apologize, but I'm unable to process your request at this time.";
 
             return new OrchestrationResult
             {
                 Response = finalResponse,
-                AgentId = "synthesizer",
+                AgentId = "coordinator",
                 Metadata = new Dictionary<string, object>
                 {
-                    ["orchestration_type"] = "sequential",
-                    ["orchestration_path"] = orchestrationPath,
+                    ["orchestration_type"] = "manual",
+                    ["orchestration_path"] = "direct",
                     ["agent_count"] = _agents.Count,
                     ["mcp_enabled"] = _agentMcpPlugins.Any(),
-                    ["runtime"] = "InProcessRuntime"
+                    ["note"] = "Using manual orchestration due to SequentialOrchestration issues"
                 }
             };
         }
@@ -570,7 +549,28 @@ Current request: {message}";
             }
             catch (Exception fallbackEx)
             {
-                _logger.LogError(fallbackEx, "Fallback chat completion also failed");
+                _logger.LogError(fallbackEx, "Fallback chat completion also failed. Error details: {Message}", fallbackEx.Message);
+
+                // Log more details if it's an HTTP exception
+                if (fallbackEx.InnerException != null)
+                {
+                    _logger.LogError("Inner exception: {InnerMessage}", fallbackEx.InnerException.Message);
+                }
+
+                // Check for specific error types
+                if (fallbackEx.Message.Contains("403") || fallbackEx.Message.Contains("Forbidden"))
+                {
+                    _logger.LogError("Authentication failed (403). Check your Azure OpenAI API key and endpoint configuration.");
+                }
+                else if (fallbackEx.Message.Contains("401") || fallbackEx.Message.Contains("Unauthorized"))
+                {
+                    _logger.LogError("Authorization failed (401). The API key may be invalid or expired.");
+                }
+                else if (fallbackEx.Message.Contains("404"))
+                {
+                    _logger.LogError("Resource not found (404). Check the deployment name and endpoint URL.");
+                }
+
                 return new OrchestrationResult
                 {
                     Response = "I apologize, but I'm having trouble processing your request. Please try again.",
@@ -597,51 +597,6 @@ Current request: {message}";
     /// ROUTING LOGIC:
     /// - Analyzes keywords in the message to determine the primary operation type
     /// - Returns "file", "web", "data", or "main" based on the analysis
-    /// - Could be enhanced to use the Coordinator agent for more intelligent routing
-    ///
-    /// This simple heuristic approach works well for clear requests but
-    /// could be replaced with ML-based classification for better accuracy.
-    /// </summary>
-    private async Task<string> DetermineOrchestrationPath(
-        string message,
-        CancellationToken cancellationToken)
-    {
-        // Convert to lowercase for case-insensitive matching
-        var lowerMessage = message.ToLowerInvariant();
-
-        // Check for file-related keywords
-        if (lowerMessage.Contains("file") ||
-            lowerMessage.Contains("directory") ||
-            lowerMessage.Contains("folder") ||
-            lowerMessage.Contains("read") ||
-            lowerMessage.Contains("write"))
-        {
-            return "file";
-        }
-
-        // Check for web-related keywords
-        if (lowerMessage.Contains("search") ||
-            lowerMessage.Contains("web") ||
-            lowerMessage.Contains("browse") ||
-            lowerMessage.Contains("http") ||
-            lowerMessage.Contains("website"))
-        {
-            return "web";
-        }
-
-        // Check for data-related keywords
-        if (lowerMessage.Contains("data") ||
-            lowerMessage.Contains("api") ||
-            lowerMessage.Contains("database") ||
-            lowerMessage.Contains("transform"))
-        {
-            return "data";
-        }
-
-        // Default to main orchestration for complex or unclear requests
-        // This ensures all agents can contribute to the response
-        return "main";
-    }
 
     /// <summary>
     /// Builds a ChatHistory object with conversation context and MCP instructions.
@@ -840,9 +795,8 @@ Current request: {message}";
             _agents[agent.Id] = chatAgent;
             _logger.LogInformation("Registered agent {AgentId}: {AgentName}", agent.Id, agent.Name);
 
-            // Re-initialize orchestrations to potentially include the new agent
-            // This allows for dynamic system extension
-            InitializeOrchestrations();
+            // Note: Sequential Orchestration removed due to SK 1.65.0 bug
+            // New agents are now available immediately for manual orchestration
         }, cancellationToken);
     }
 
@@ -883,4 +837,3 @@ internal class OrchestrationResult
     public Dictionary<string, object> Metadata { get; set; } = [];
 }
 
-#pragma warning restore SKEXP0110
