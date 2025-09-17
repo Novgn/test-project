@@ -186,10 +186,23 @@ public class SemanticKernelOrchestrator : IOrchestrator
                    - File operations (reading, writing, navigating files)
                    - Web operations (searching, browsing, fetching content)
                    - Data operations (processing, transforming, API calls)
-                3. Provide clear analysis of what needs to be done
-                4. Structure the request for the appropriate sub-agents
+                3. Delegate tasks to appropriate agents
+                4. Synthesize results into a final response
 
-                Analyze the request and describe what type of operation is needed.",
+                IMPORTANT: You must delegate tasks using this exact format:
+                [DELEGATE:agentName] task description
+
+                Available agents:
+                - fileAgent: For file system operations
+                - webAgent: For web searches and browsing
+                - dataAgent: For data processing and API calls
+
+                Example response format:
+                'I'll help you search for Python tutorials and save them to a file.
+                [DELEGATE:webAgent] Search for the top 10 Python tutorials online
+                [DELEGATE:fileAgent] Create a file called python_tutorials.txt and save the results'
+
+                Always provide a friendly introduction, then delegate tasks, then summarize what will be done.",
             Kernel = coordinatorKernel
         };
 
@@ -477,23 +490,39 @@ public class SemanticKernelOrchestrator : IOrchestrator
                 break; // Take only the first response (agents can stream multiple messages)
             }
 
-            // ===== STEP 2: SPECIALIZED AGENT ROUTING (NOT IMPLEMENTED) =====
-            // TODO: Parse coordinator response to determine which agent to use:
-            // - If file operations detected → Route to FileAgent
-            // - If web search needed → Route to WebAgent
-            // - If data processing required → Route to DataAgent
-            // Example pseudo-code:
-            // if (coordinatorResponse.Content.Contains("file")) {
-            //     var fileAgentResponse = await InvokeFileAgent(message);
-            //     // Process file agent response...
-            // }
+            // ===== STEP 2: PARSE DELEGATIONS AND EXECUTE SPECIALIZED AGENTS =====
+            var agentResponses = new Dictionary<string, string>();
+            var delegations = ParseDelegations(coordinatorResponse?.Content ?? "");
 
-            // ===== STEP 3: SYNTHESIZER AGENT (NOT IMPLEMENTED) =====
-            // TODO: Pass all agent responses to synthesizer for final formatting
-            // The synthesizer would combine multiple agent outputs into a coherent response
+            foreach (var delegation in delegations)
+            {
+                _logger.LogInformation("Delegating to {Agent}: {Task}", delegation.AgentName, delegation.Task);
 
-            // ===== CURRENT IMPLEMENTATION: Return Coordinator's Response Directly =====
-            var finalResponse = coordinatorResponse?.Content ?? "I apologize, but I'm unable to process your request at this time.";
+                if (_agents.TryGetValue(delegation.AgentName, out var agent))
+                {
+                    var agentMessage = new ChatMessageContent(AuthorRole.User, delegation.Task);
+                    ChatMessageContent? agentResponse = null;
+                    await foreach (var response in agent.InvokeAsync(agentMessage, cancellationToken: cancellationToken))
+                    {
+                        // Store the response item directly
+                        agentResponse = response;
+                        break; // Take first response
+                    }
+
+                    if (agentResponse != null)
+                    {
+                        agentResponses[delegation.AgentName] = agentResponse.Content ?? "No response";
+                        _logger.LogDebug("{Agent} response: {Content}", delegation.AgentName, agentResponse.Content);
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("Agent {AgentName} not found for delegation", delegation.AgentName);
+                }
+            }
+
+            // ===== STEP 3: COMPILE FINAL RESPONSE =====
+            var finalResponse = BuildFinalResponse(coordinatorResponse?.Content, agentResponses);
 
             return new OrchestrationResult
             {
@@ -818,6 +847,76 @@ public class SemanticKernelOrchestrator : IOrchestrator
         }
 
         return agentKernel;
+    }
+
+    /// <summary>
+    /// Parse delegation commands from the coordinator's response
+    /// </summary>
+    private List<(string AgentName, string Task)> ParseDelegations(string coordinatorResponse)
+    {
+        var delegations = new List<(string AgentName, string Task)>();
+
+        if (string.IsNullOrWhiteSpace(coordinatorResponse))
+            return delegations;
+
+        // Parse [DELEGATE:agentName] task format
+        var lines = coordinatorResponse.Split('\n');
+        foreach (var line in lines)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                line,
+                @"\[DELEGATE:(\w+)\]\s*(.+)");
+
+            if (match.Success)
+            {
+                var agentName = match.Groups[1].Value;
+                var task = match.Groups[2].Value;
+                delegations.Add((agentName, task));
+                _logger.LogDebug("Parsed delegation: {Agent} -> {Task}", agentName, task);
+            }
+        }
+
+        return delegations;
+    }
+
+    /// <summary>
+    /// Build the final response from coordinator and agent responses
+    /// </summary>
+    private string BuildFinalResponse(string? coordinatorResponse, Dictionary<string, string> agentResponses)
+    {
+        var finalBuilder = new System.Text.StringBuilder();
+
+        // Extract the coordinator's summary (non-delegation lines)
+        if (!string.IsNullOrWhiteSpace(coordinatorResponse))
+        {
+            var lines = coordinatorResponse.Split('\n');
+            foreach (var line in lines)
+            {
+                // Skip delegation lines
+                if (!line.Contains("[DELEGATE:"))
+                {
+                    finalBuilder.AppendLine(line);
+                }
+            }
+        }
+
+        // Add agent responses if any
+        if (agentResponses.Count > 0)
+        {
+            finalBuilder.AppendLine();
+            finalBuilder.AppendLine("---");
+
+            foreach (var (agentName, response) in agentResponses)
+            {
+                finalBuilder.AppendLine($"\n**{agentName} Results:**");
+                finalBuilder.AppendLine(response);
+            }
+        }
+
+        var result = finalBuilder.ToString().Trim();
+        return string.IsNullOrWhiteSpace(result)
+            ? "I've processed your request successfully."
+            : result;
     }
 }
 
