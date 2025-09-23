@@ -176,4 +176,50 @@ public class ChatHub : Hub
             await Clients.Caller.SendAsync("Error", $"Failed to retrieve agents: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// Join a SignalR group (used for Sentinel setup sessions)
+    /// </summary>
+    public async Task JoinGroup(string groupName)
+    {
+        if (string.IsNullOrEmpty(groupName))
+        {
+            await Clients.Caller.SendAsync("Error", "Group name cannot be empty.");
+            return;
+        }
+
+        await Groups.AddToGroupAsync(Context.ConnectionId, groupName);
+        _logger.LogInformation("Client {ConnectionId} joined group {GroupName}",
+            Context.ConnectionId, groupName);
+
+        await Clients.Caller.SendAsync("JoinedGroup", new
+        {
+            groupName,
+            connectionId = Context.ConnectionId,
+            timestamp = DateTime.UtcNow
+        });
+    }
+
+    /// <summary>
+    /// Leave a SignalR group
+    /// </summary>
+    public async Task LeaveGroup(string groupName)
+    {
+        if (string.IsNullOrEmpty(groupName))
+        {
+            await Clients.Caller.SendAsync("Error", "Group name cannot be empty.");
+            return;
+        }
+
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, groupName);
+        _logger.LogInformation("Client {ConnectionId} left group {GroupName}",
+            Context.ConnectionId, groupName);
+
+        await Clients.Caller.SendAsync("LeftGroup", new
+        {
+            groupName,
+            connectionId = Context.ConnectionId,
+            timestamp = DateTime.UtcNow
+        });
+    }
 }

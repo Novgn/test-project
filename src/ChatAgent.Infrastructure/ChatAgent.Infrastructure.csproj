@@ -11,6 +11,22 @@
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+
+    <!-- AWS SDK -->
+    <PackageReference Include="AWSSDK.Core" />
+    <PackageReference Include="AWSSDK.S3" />
+    <PackageReference Include="AWSSDK.SQS" />
+    <PackageReference Include="AWSSDK.IdentityManagement" />
+    <PackageReference Include="AWSSDK.SecurityToken" />
+    <PackageReference Include="AWSSDK.CloudTrail" />
+    <PackageReference Include="AWSSDK.EC2" />
+
+    <!-- Azure Resource Management -->
+    <PackageReference Include="Azure.Identity" />
+    <PackageReference Include="Azure.ResourceManager" />
+    <PackageReference Include="Azure.ResourceManager.SecurityInsights" />
+    <PackageReference Include="Azure.ResourceManager.OperationalInsights" />
   </ItemGroup>
 
   <ItemGroup>

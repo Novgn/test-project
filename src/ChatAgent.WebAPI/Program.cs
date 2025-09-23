@@ -3,6 +3,7 @@ using ChatAgent.Application.Orchestration;
 using ChatAgent.Application.Plugins;
 using ChatAgent.Domain.Interfaces;
 using ChatAgent.Infrastructure.McpTools;
+using ChatAgent.Infrastructure.McpTools.SentinelConnector;
 using ChatAgent.Infrastructure.Repositories;
 using ChatAgent.Infrastructure.SignalR;
 using Azure.Identity;
@@ -32,7 +33,8 @@ builder.Services.AddCors(options =>
                     "https://localhost:5173")
                 .AllowAnyHeader()
                 .AllowAnyMethod()
-                .AllowCredentials();
+                .AllowCredentials()
+                .WithExposedHeaders("*");
         });
 });
 
@@ -140,8 +142,41 @@ builder.Services.AddSingleton<IMcpToolProvider>(provider =>
         logger);
 });
 
+// ===== Register Sentinel Connector MCP Tool Providers =====
+// ARM API Tool Provider for Azure operations
+builder.Services.AddHttpClient("ArmApi");
+builder.Services.AddSingleton<IMcpToolProvider, ArmApiToolProvider>();
+
+// AWS Infrastructure Tool Provider
+builder.Services.AddSingleton<IMcpToolProvider, AwsInfrastructureToolProvider>();
+
+// Sentinel Connector Coordinator Tool Provider
+builder.Services.AddSingleton<IMcpToolProvider, SentinelConnectorCoordinatorToolProvider>();
+
+// Register the Sentinel Connector Group Chat Orchestrator
+builder.Services.AddSingleton<SentinelConnectorGroupChatOrchestrator>(provider =>
+{
+    var kernel = provider.GetRequiredService<Kernel>();
+    var logger = provider.GetRequiredService<ILogger<SentinelConnectorGroupChatOrchestrator>>();
+    var mcpProviders = provider.GetServices<IMcpToolProvider>();
+
+    return new SentinelConnectorGroupChatOrchestrator(
+        kernel,
+        logger,
+        mcpProviders,
+        provider);
+});
+
 // Register the MCP tool plugin
 builder.Services.AddSingleton<McpToolPlugin>();
+
+// Register plugin loggers
+builder.Services.AddSingleton<ILogger<CoordinatorPlugin>>(provider =>
+    provider.GetRequiredService<ILoggerFactory>().CreateLogger<CoordinatorPlugin>());
+builder.Services.AddSingleton<ILogger<AzurePlugin>>(provider =>
+    provider.GetRequiredService<ILoggerFactory>().CreateLogger<AzurePlugin>());
+builder.Services.AddSingleton<ILogger<AwsPlugin>>(provider =>
+    provider.GetRequiredService<ILoggerFactory>().CreateLogger<AwsPlugin>());
 
 // Register the orchestrator with MCP support
 builder.Services.AddSingleton<IOrchestrator>(provider =>
@@ -163,6 +198,10 @@ builder.Services.AddSingleton<IOrchestrator>(provider =>
 var app = builder.Build();
 
 // Configure the HTTP request pipeline
+
+// CORS must be early in the pipeline
+app.UseCors("AllowReactApp");
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -174,7 +213,7 @@ if (!app.Environment.IsDevelopment())
 {
     app.UseHttpsRedirection();
 }
-app.UseCors("AllowReactApp");
+
 app.UseAuthorization();
 app.MapControllers();
 app.MapHub<ChatHub>("/chathub");

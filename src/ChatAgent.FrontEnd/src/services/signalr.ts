@@ -222,6 +222,66 @@ class SignalRService {
   }
 
   /**
+   * Join a SignalR group (for Sentinel setup sessions)
+   */
+  async joinGroup(groupName: string): Promise<void> {
+    if (!this.connection || !this.isConnected) {
+      // If not connected, connect first
+      await this.connect();
+    }
+
+    if (this.connection) {
+      // Register Sentinel-specific event handlers
+      this.connection.on('setupStarted', (data: any) => {
+        if (this.customHandlers['setupStarted']) {
+          this.customHandlers['setupStarted'](data);
+        }
+      });
+
+      this.connection.on('phaseUpdate', (data: any) => {
+        if (this.customHandlers['phaseUpdate']) {
+          this.customHandlers['phaseUpdate'](data);
+        }
+      });
+
+      this.connection.on('agentMessage', (data: any) => {
+        if (this.customHandlers['agentMessage']) {
+          this.customHandlers['agentMessage'](data);
+        }
+      });
+
+      this.connection.on('setupCompleted', (data: any) => {
+        if (this.customHandlers['setupCompleted']) {
+          this.customHandlers['setupCompleted'](data);
+        }
+      });
+
+      this.connection.on('setupError', (data: any) => {
+        if (this.customHandlers['setupError']) {
+          this.customHandlers['setupError'](data);
+        }
+      });
+
+      // Join the group
+      await this.connection.invoke('JoinGroup', groupName);
+      console.log('Joined SignalR group:', groupName);
+    }
+  }
+
+  /**
+   * Leave a SignalR group
+   */
+  async leaveGroup(groupName: string): Promise<void> {
+    if (this.connection && this.isConnected) {
+      await this.connection.invoke('LeaveGroup', groupName);
+      console.log('Left SignalR group:', groupName);
+    }
+  }
+
+  // Store for custom event handlers
+  private customHandlers: { [key: string]: any } = {};
+
+  /**
    * Register event handlers
    */
   on(event: 'messageReceived', handler: (message: ChatMessage) => void): void;
@@ -249,6 +309,10 @@ class SignalRService {
         break;
       case 'disconnected':
         this.handlers.onDisconnected = handler;
+        break;
+      default:
+        // Store custom handlers for Sentinel events
+        this.customHandlers[event] = handler;
         break;
     }
   }
