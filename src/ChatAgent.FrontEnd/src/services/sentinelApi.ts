@@ -48,7 +48,7 @@ class SentinelApi {
    * Start the Sentinel connector setup process
    */
   async startSetup(config: SetupConfiguration): Promise<SetupResponse> {
-    const response = await fetch(`${API_BASE_URL}/api/sentinelconnector/setup`, {
+    const response = await fetch(`${API_BASE_URL}/api/SentinelConnector/setup`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -68,7 +68,7 @@ class SentinelApi {
    * Validate prerequisites for the setup
    */
   async validatePrerequisites(config: Partial<SetupConfiguration>): Promise<any> {
-    const response = await fetch(`${API_BASE_URL}/api/sentinelconnector/validate`, {
+    const response = await fetch(`${API_BASE_URL}/api/SentinelConnector/validate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -88,7 +88,7 @@ class SentinelApi {
    * Get the status of an existing connector
    */
   async getConnectorStatus(connectorId: string): Promise<ConnectorStatus> {
-    const response = await fetch(`${API_BASE_URL}/api/sentinelconnector/status/${connectorId}`, {
+    const response = await fetch(`${API_BASE_URL}/api/SentinelConnector/status/${connectorId}`, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -108,7 +108,7 @@ class SentinelApi {
    */
   async joinSession(sessionId: string, connectionId: string): Promise<any> {
     const response = await fetch(
-      `${API_BASE_URL}/api/sentinelconnector/join-session/${sessionId}?connectionId=${connectionId}`,
+      `${API_BASE_URL}/api/SentinelConnector/join-session/${sessionId}?connectionId=${connectionId}`,
       {
         method: 'POST',
         headers: {

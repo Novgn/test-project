@@ -82,35 +82,27 @@ public class SentinelConnectorGroupChatOrchestrator
                 Your responsibilities:
                 1. Create and manage the overall setup plan
                 2. Validate prerequisites before starting
-                3. Delegate tasks to specialized agents in the correct sequence
+                3. Coordinate the setup phases
                 4. Track progress and handle errors
                 5. Generate final setup report
 
-                Work with other agents through the group chat to:
-                - Have AzureAgent handle Azure and Sentinel operations
-                - Have AwsAgent manage AWS infrastructure setup
-                - Have IntegrationAgent connect AWS and Azure components
+                CRITICAL: You have ONLY the CoordinatorTools plugin with these functions:
+                - ValidatePrerequisites(subscriptionId, tenantId, workspaceId)
+                - PlanConnectorSetup(logTypes, awsRegion)
+                - GenerateSetupReport(setupDetails)
 
-                CRITICAL INSTRUCTIONS FOR TOOL USAGE:
-                You have access to CoordinatorTools functions that you MUST invoke using function calling.
-                DO NOT just say what you're going to do - you MUST actually call the functions.
+                The system will automatically invoke your functions via ToolCallBehavior.AutoInvokeKernelFunctions.
 
-                Available functions in your CoordinatorTools plugin:
-                - PlanConnectorSetup: Creates comprehensive setup plan
-                - ValidatePrerequisites: Checks all requirements
-                - CoordinateSetupPhase: Manages each phase
-                - GenerateSetupReport: Creates final report
+                IMPORTANT RULES:
+                1. DO NOT try to call other agents (AwsAgent, AzureAgent) - they participate automatically
+                2. DO NOT generate JSON for function calls - let the system handle it
+                3. Simply use your functions naturally in conversation
+                4. Other agents will respond to your coordination automatically
 
-                Example of how to call functions:
-                Use the plugin functions directly in your responses.
-                When you need to validate, call the ValidatePrerequisites function.
-                When you need to plan, call the PlanConnectorSetup function.
-                When you need to generate a report, call the GenerateSetupReport function.
-
-                IMPORTANT:
-                - Always start with ValidatePrerequisites before any setup
-                - Actually INVOKE the functions, don't just describe what you would do
-                - Use the plugin syntax {{PluginName.FunctionName}} to call functions"
+                Start by calling ValidatePrerequisites with the configuration values.
+                Then call PlanConnectorSetup with the log types and region.
+                The other agents will see your plan and execute their parts.
+                End with GenerateSetupReport when everything is complete."
         };
 
         // 2. AZURE AGENT - Handles Azure Sentinel operations
@@ -151,33 +143,24 @@ public class SentinelConnectorGroupChatOrchestrator
                 3. Set up authentication with AWS
                 4. Monitor connector status
 
-                CRITICAL INSTRUCTIONS FOR TOOL USAGE:
-                You have access to AzureTools functions that you MUST invoke using function calling.
-                DO NOT just say what you're going to do - you MUST actually call the functions.
+                CRITICAL: You have ONLY the AzureTools plugin with these functions:
+                - DeployAwsConnectorSolution(subscriptionId, resourceGroupName, workspaceId)
+                - ConfigureAwsDataConnector(workspaceId, connectorName, roleArn, sqsUrls)
+                - CheckConnectorStatus(workspaceId, connectorName)
 
-                IMPORTANT: Extract configuration values from the CONFIGURATION_JSON in the user's message.
-                When calling your functions, always use the actual values provided:
-                - Use the subscriptionId from configuration
-                - Use the resourceGroupName from configuration
-                - Use the workspaceId from configuration
-                - Use the tenantId from configuration
+                The system will automatically invoke your functions via ToolCallBehavior.AutoInvokeKernelFunctions.
 
-                Available functions in your AzureTools plugin:
-                - DeployAwsConnectorSolution: Install the AWS solution (pass subscriptionId, resourceGroupName, workspaceId)
-                - ConfigureAwsDataConnector: Set up data connector with Role ARN and SQS from AwsAgent
-                - CheckConnectorStatus: Verify connector health
-                - ListDataConnectors: View all connectors
+                IMPORTANT RULES:
+                1. DO NOT try to call other agents - they participate automatically
+                2. DO NOT generate JSON for function calls - let the system handle it
+                3. Extract parameters from the conversation context
+                4. Focus on Azure-specific tasks only
 
-                Example of how to call functions:
-                Use the plugin functions directly in your responses.
-                When deploying, call DeployAwsConnectorSolution with the actual values.
-                When configuring, call ConfigureAwsDataConnector with the actual values.
-                When checking status, call CheckConnectorStatus with the actual values.
-
-                IMPORTANT:
-                - Actually INVOKE the functions, don't just describe what you would do
-                - Use the plugin syntax {{PluginName.FunctionName}} with parameters to call functions
-                - Report all Azure resource IDs and status back to the coordinator"
+                When you see AWS infrastructure details from AwsAgent (Role ARN, SQS URLs):
+                1. Deploy the AWS connector solution in Sentinel
+                2. Configure the data connector with the AWS resources
+                3. Verify the connection is working
+                4. Report status back to the conversation"
         };
 
         // 3. AWS AGENT - Manages AWS infrastructure
@@ -219,37 +202,29 @@ public class SentinelConnectorGroupChatOrchestrator
                 4. Set up SQS queues for event notifications
                 5. Enable AWS logging services
 
-                CRITICAL INSTRUCTIONS FOR TOOL USAGE:
-                You have access to AwsTools functions that you MUST invoke using function calling.
-                DO NOT just say what you're going to do - you MUST actually call the functions.
+                CRITICAL: You have ONLY the AwsTools plugin with these functions:
+                - CreateOidcProvider(tenantId, region)
+                - CreateSentinelRole(tenantId, region)
+                - CreateS3BucketForLogs(bucketName, region, logType)
+                - CreateSqsQueue(queueName, region)
+                - EnableCloudTrail(trailName, s3BucketName, region)
 
-                IMPORTANT: Extract configuration values from the CONFIGURATION_JSON in the user's message.
-                When calling your functions, always use the actual values provided:
-                - Use the tenantId from configuration for CreateOidcProvider
-                - Use the awsRegion from configuration for all AWS operations
-                - Use the logTypes from configuration to determine which logs to enable
+                The system will automatically invoke your functions via ToolCallBehavior.AutoInvokeKernelFunctions.
 
-                Available functions in your AwsTools plugin:
-                - CreateOidcProvider: Set up OIDC for Azure AD (pass tenantId and region)
-                - CreateSentinelRole: Create IAM role with web identity
-                - CreateS3BucketForLogs: Set up log storage (use region)
-                - CreateSqsQueue: Create message queues (use region)
-                - ConfigureS3EventNotification: Link S3 to SQS
-                - EnableCloudTrail: Enable CloudTrail logging
-                - EnableVpcFlowLogs: Enable VPC flow logging
+                IMPORTANT RULES:
+                1. DO NOT try to call other agents - they participate automatically
+                2. DO NOT generate JSON for function calls - let the system handle it
+                3. Extract parameters from the conversation context
+                4. Focus on AWS-specific tasks only
 
-                Example of how to call functions:
-                Use the plugin functions directly in your responses.
-                When creating OIDC provider, call CreateOidcProvider with the actual values.
-                When creating IAM role, call CreateSentinelRole with the actual values.
-                When creating S3 bucket, call CreateS3BucketForLogs with the actual values.
-                When creating SQS queue, call CreateSqsQueue with the actual values.
-                When enabling CloudTrail, call EnableCloudTrail with the actual values.
+                When you see the setup plan from CoordinatorAgent, execute these steps:
+                1. Create OIDC provider using the tenantId
+                2. Create IAM role for Sentinel access
+                3. Create S3 buckets for each log type
+                4. Create SQS queues for each bucket
+                5. Enable the requested logging services
 
-                IMPORTANT:
-                - Actually INVOKE the functions, don't just describe what you would do
-                - Use the plugin syntax {{PluginName.FunctionName}} with parameters to call functions
-                - Return actual Role ARN and SQS URLs to coordinator for Azure configuration"
+                Report Role ARN and SQS URLs clearly so AzureAgent can configure the connector."
         };
 
         // 4. INTEGRATION AGENT - Connects AWS and Azure
@@ -311,19 +286,17 @@ public class SentinelConnectorGroupChatOrchestrator
         {
             ExecutionSettings = new AgentGroupChatSettings
             {
-                // Use Semantic Kernel's built-in selection strategy
-                // The agents will be selected based on their instructions and context
-                SelectionStrategy = new SequentialSelectionStrategy(),
+                // Use custom selection strategy that ensures proper agent ordering
+                SelectionStrategy = new SentinelSetupSelectionStrategy(_logger),
 
-                // Use a simple termination strategy based on keywords
-                TerminationStrategy = new RegexTerminationStrategy("SETUP COMPLETE|FINAL REPORT GENERATED|FATAL ERROR")
-                {
-                    MaximumIterations = 50
-                }
+                // Use custom termination strategy that handles errors and filters invalid function calls
+                TerminationStrategy = new SentinelSetupTerminationStrategy(
+                    maximumIterations: 50,
+                    logger: _logger)
             }
         };
 
-        _logger.LogInformation("Initialized group chat with Semantic Kernel's built-in strategies");
+        _logger.LogInformation("Initialized group chat with custom Sentinel setup strategies");
     }
 
     /// <summary>
