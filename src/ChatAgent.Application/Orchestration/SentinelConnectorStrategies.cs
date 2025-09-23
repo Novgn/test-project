@@ -24,7 +24,7 @@ public class SentinelSetupTerminationStrategy : TerminationStrategy
     private readonly List<string> _detectedErrors = new();
 
     public SentinelSetupTerminationStrategy(
-        int maximumIterations = 50,
+        int maximumIterations = 100,
         ILogger? logger = null)
     {
         _maximumIterations = maximumIterations;
@@ -105,10 +105,11 @@ public class SentinelSetupTerminationStrategy : TerminationStrategy
                         message.AuthorName,
                         content.Substring(0, Math.Min(200, content.Length)));
 
-                    // If we see multiple errors, terminate to prevent false success
-                    if (_errorCount >= 3)
+                    // If we see multiple errors from the same issue, don't terminate immediately
+                    // Allow the agents to recover and retry
+                    if (_errorCount >= 5)
                     {
-                        _logger?.LogError("Multiple errors detected ({ErrorCount}), terminating to prevent false success claims", _errorCount);
+                        _logger?.LogError("Too many errors detected ({ErrorCount}), terminating to prevent infinite loop", _errorCount);
                         return await Task.FromResult(true);
                     }
                 }
@@ -122,11 +123,13 @@ public class SentinelSetupTerminationStrategy : TerminationStrategy
                     continue;
                 }
 
-                // Check for critical errors that should terminate immediately
+                // Check for critical errors but don't terminate immediately - let agents try to recover
                 if (_errorPhrases.Any(phrase => content.Contains(phrase, StringComparison.OrdinalIgnoreCase)))
                 {
-                    _logger?.LogError("Critical error detected in message from {Agent}", message.AuthorName);
-                    return await Task.FromResult(true);
+                    _logger?.LogError("Critical error detected in message from {Agent}, allowing recovery attempt", message.AuthorName);
+                    _errorCount++;
+                    _hasDetectedErrors = true;
+                    // Don't terminate immediately - let agents attempt recovery
                 }
 
                 // Only allow successful completion if no errors detected
@@ -514,29 +517,100 @@ public class SentinelSetupSelectionStrategy : SelectionStrategy
             return agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
         }
 
-        // If coordinator just created a plan, AWS should start implementing
-        if (lastMessage.AuthorName == "CoordinatorAgent" &&
-            (content.Contains("plan") || content.Contains("validated")))
+        // Analyze what the coordinator is asking for or what phase we're transitioning to
+        if (lastMessage.AuthorName == "CoordinatorAgent")
         {
-            return agents.FirstOrDefault(a => a.Name == "AwsAgent");
+            // If coordinator just created a plan with phases, start with Azure setup (Phase 1)
+            if (content.Contains("setup plan generated successfully") ||
+                content.Contains("phase 1") && content.Contains("azure preparation"))
+            {
+                _logger?.LogInformation("Coordinator finished planning, selecting AzureAgent for Azure Preparation (Phase 1)");
+                return agents.FirstOrDefault(a => a.Name == "AzureAgent");
+            }
+
+            // If coordinator is asking for AWS work after Azure is done
+            if (content.Contains("phase 2") && content.Contains("aws infrastructure") ||
+                content.Contains("azure preparation complete"))
+            {
+                _logger?.LogInformation("Azure preparation complete, selecting AwsAgent for AWS infrastructure setup (Phase 2)");
+                return agents.FirstOrDefault(a => a.Name == "AwsAgent");
+            }
+
+            // If coordinator validated prerequisites
+            if (content.Contains("prerequisites validated") || content.Contains("can proceed"))
+            {
+                _logger?.LogInformation("Prerequisites validated, keeping coordinator to create plan");
+                return agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
+            }
         }
 
-        // If AWS just finished creating resources, Azure should configure
-        if (lastMessage.AuthorName == "AwsAgent" &&
-            (content.Contains("role arn") || content.Contains("sqs")))
+        // If Azure agent finished preparation, move to AWS setup
+        if (lastMessage.AuthorName == "AzureAgent")
         {
-            return agents.FirstOrDefault(a => a.Name == "AzureAgent");
+            // If Azure preparation is complete, start AWS infrastructure
+            if (content.Contains("solution deployed") ||
+                content.Contains("content hub") ||
+                content.Contains("azure preparation complete") ||
+                content.Contains("sentinel workspace ready"))
+            {
+                _logger?.LogInformation("Azure preparation complete, selecting AwsAgent for infrastructure setup");
+                return agents.FirstOrDefault(a => a.Name == "AwsAgent");
+            }
+
+            // If Azure finished final connector configuration (after AWS), coordinator should verify
+            if (content.Contains("connector configured") ||
+                content.Contains("data connector configured") ||
+                content.Contains("connection established"))
+            {
+                _logger?.LogInformation("Azure connector configuration complete, selecting CoordinatorAgent for verification");
+                return agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
+            }
         }
 
-        // If Azure configured connector, coordinator should verify and report
-        if (lastMessage.AuthorName == "AzureAgent" &&
-            (content.Contains("configured") || content.Contains("deployed")))
+        // If AWS agent just finished creating resources, Azure should do final connector configuration
+        if (lastMessage.AuthorName == "AwsAgent")
         {
-            return agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
+            if (content.Contains("oidc provider created") ||
+                content.Contains("iam role created") ||
+                content.Contains("s3 bucket created") ||
+                content.Contains("sqs queue created"))
+            {
+                // Check if all AWS work is done
+                var awsMessages = history.Where(m => m.AuthorName == "AwsAgent").ToList();
+                var hasOidc = awsMessages.Any(m => m.Content?.ToLower().Contains("oidc") ?? false);
+                var hasRole = awsMessages.Any(m => m.Content?.ToLower().Contains("role") ?? false);
+                var hasBuckets = awsMessages.Any(m => m.Content?.ToLower().Contains("bucket") ?? false);
+
+                if (hasOidc && hasRole && hasBuckets)
+                {
+                    _logger?.LogInformation("AWS infrastructure ready, selecting AzureAgent for final connector configuration");
+                    return agents.FirstOrDefault(a => a.Name == "AzureAgent");
+                }
+                else
+                {
+                    _logger?.LogInformation("AWS still has work to do, keeping AwsAgent");
+                    return agents.FirstOrDefault(a => a.Name == "AwsAgent");
+                }
+            }
         }
 
-        // Default to coordinator for orchestration
-        return agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
+        // Check the conversation phase and select appropriately
+        var currentPhase = DeterminePhase(history);
+        _logger?.LogDebug("Current phase determined as: {Phase}", currentPhase);
+
+        switch (currentPhase)
+        {
+            case "aws-setup":
+                return agents.FirstOrDefault(a => a.Name == "AwsAgent");
+            case "azure-setup":
+                return agents.FirstOrDefault(a => a.Name == "AzureAgent");
+            case "monitoring":
+                return agents.FirstOrDefault(a => a.Name == "MonitorAgent") ??
+                       agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
+            default:
+                // Default to coordinator for orchestration
+                return agents.FirstOrDefault(a => a.Name == "CoordinatorAgent");
+        }
     }
 
     private string DeterminePhase(IReadOnlyList<ChatMessageContent> history)
@@ -556,37 +630,76 @@ public class SentinelSetupSelectionStrategy : SelectionStrategy
             return "error-recovery";
         }
 
-        // Check for specific phase indicators in order of progression
-        if (allContent.Contains("final report") || allContent.Contains("setup complete"))
+        // Look for explicit phase transitions in agent messages
+        var lastAgentMessage = history.LastOrDefault(m =>
+            m.AuthorName != null && m.AuthorName.EndsWith("Agent"));
+        var lastAgentContent = lastAgentMessage?.Content?.ToLower() ?? string.Empty;
+
+        // Check for completion indicators
+        if (allContent.Contains("final report") || allContent.Contains("setup complete") ||
+            allContent.Contains("all phases completed"))
             return "completion";
 
-        if (allContent.Contains("monitor") || allContent.Contains("verify") && allContent.Contains("ingestion"))
-            return "monitoring";
+        // Check if we're in planning phase (after validation, before implementation)
+        if (allContent.Contains("plan generated") ||
+            (allContent.Contains("plan") && allContent.Contains("azure preparation")))
+        {
+            // If plan was just created, move to Azure setup first (Phase 1)
+            if (lastAgentContent.Contains("setup plan generated successfully") ||
+                lastAgentContent.Contains("phase 1") && lastAgentContent.Contains("azure"))
+                return "azure-setup";
+        }
 
-        if (allContent.Contains("configure") && allContent.Contains("connector"))
+        // Check for Azure setup phase indicators (Phase 1 - comes first)
+        if (allContent.Contains("deploying aws connector solution") ||
+            allContent.Contains("installing") && allContent.Contains("content hub") ||
+            allContent.Contains("azure sentinel") && allContent.Contains("workspace") ||
+            (allContent.Contains("phase 1") || allContent.Contains("azure preparation")))
             return "azure-setup";
 
-        if (allContent.Contains("role arn") || allContent.Contains("sqs") || allContent.Contains("oidc"))
+        // Check for AWS setup phase indicators (Phase 2 - comes after Azure)
+        if (allContent.Contains("creating oidc provider") ||
+            allContent.Contains("creating iam role") ||
+            allContent.Contains("creating s3 bucket") ||
+            allContent.Contains("creating sqs queue") ||
+            allContent.Contains("aws infrastructure") ||
+            (allContent.Contains("phase 2") && allContent.Contains("aws")))
             return "aws-setup";
 
+        // Check for integration/connection phase
+        if (allContent.Contains("configuring connection") ||
+            allContent.Contains("role arn configuration") ||
+            allContent.Contains("sqs url configuration"))
+            return "integration";
+
+        // Check for monitoring phase (only after integration)
+        if ((allContent.Contains("monitor") || allContent.Contains("verify")) &&
+            allContent.Contains("ingestion") &&
+            history.Count > 25) // Only consider monitoring after other phases
+            return "monitoring";
+
+        // Check for validation phase
+        if (allContent.Contains("validat") || allContent.Contains("prerequisite"))
+            return "validation";
+
+        // Check for planning phase
         if (allContent.Contains("plan") && allContent.Contains("setup"))
             return "planning";
 
-        if (allContent.Contains("validate") || allContent.Contains("prerequisite"))
-            return "validation";
-
-        // Default phase based on message count
+        // Default phase based on message count and progression
         if (history.Count < 3)
             return "initialization";
         else if (history.Count < 6)
             return "validation";
         else if (history.Count < 10)
             return "planning";
-        else if (history.Count < 20)
-            return "aws-setup";
-        else if (history.Count < 30)
-            return "azure-setup";
+        else if (history.Count < 15)
+            return "azure-setup";  // Azure comes first
+        else if (history.Count < 25)
+            return "aws-setup";    // AWS comes after Azure
+        else if (history.Count < 35)
+            return "integration";  // Connection configuration
         else
-            return "integration";
+            return "monitoring";
     }
 }
