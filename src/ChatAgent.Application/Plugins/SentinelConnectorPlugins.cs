@@ -178,6 +178,11 @@ public class AzurePlugin
 
         try
         {
+            // Clean parameter values in case they contain labels or prefixes
+            resourceGroupName = CleanParameterValue(resourceGroupName);
+            subscriptionId = CleanParameterValue(subscriptionId);
+            workspaceId = CleanParameterValue(workspaceId);
+
             var parameters = new Dictionary<string, object>
             {
                 ["subscriptionId"] = subscriptionId,
@@ -272,6 +277,42 @@ public class AzurePlugin
             _logger.LogError(ex, "Error checking connector status");
             return JsonSerializer.Serialize(new { success = false, error = ex.Message });
         }
+    }
+
+    private string CleanParameterValue(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        // Remove common prefixes and labels
+        var prefixes = new[] {
+            "resourceGroup:",
+            "subscription:",
+            "workspace:",
+            "subscriptionId:",
+            "resourceGroupName:",
+            "workspaceId:"
+        };
+
+        foreach (var prefix in prefixes)
+        {
+            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value.Substring(prefix.Length).Trim();
+            }
+        }
+
+        // Also check if the value contains the pattern anywhere (like "resourceGroup: urelmattis")
+        foreach (var prefix in prefixes)
+        {
+            if (value.Contains(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var index = value.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+                value = value.Substring(index + prefix.Length).Trim();
+            }
+        }
+
+        return value;
     }
 }
 
