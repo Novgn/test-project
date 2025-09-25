@@ -8,8 +8,12 @@ import type { ChatMessage, AgentStatus } from '../types';
 
 /**
  * SignalR hub URL configuration
+ * In development, use relative URLs to go through Vite proxy
+ * In production, use the environment variable or default
  */
-const HUB_URL = import.meta.env.VITE_API_BASE_URL || 'https://localhost:7248';
+const HUB_URL = import.meta.env.DEV
+  ? window.location.origin // Use current origin in development (Vite proxy will handle it)
+  : (import.meta.env.VITE_API_BASE_URL || 'https://localhost:7248');
 
 /**
  * SignalR connection manager
@@ -58,7 +62,10 @@ class SignalRService {
 
     // Create new connection with automatic reconnection
     this.connection = new signalR.HubConnectionBuilder()
-      .withUrl(url)
+      .withUrl(url, {
+        withCredentials: true,
+        transport: signalR.HttpTransportType.WebSockets | signalR.HttpTransportType.ServerSentEvents | signalR.HttpTransportType.LongPolling
+      })
       .withAutomaticReconnect({
         nextRetryDelayInMilliseconds: (retryContext) => {
           // Exponential backoff: 0, 2, 4, 8, 16, 30 seconds

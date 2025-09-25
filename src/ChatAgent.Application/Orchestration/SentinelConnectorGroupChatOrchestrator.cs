@@ -487,8 +487,8 @@ Would you like to continue with the next step?";
                 {
                     ExecutionSettings = new AgentGroupChatSettings
                     {
-                        TerminationStrategy = new CoordinatorTerminationStrategy(),
-                        SelectionStrategy = new CoordinatorSelectionStrategy(_logger)
+                        TerminationStrategy = new SentinelSetupTerminationStrategy(50, _logger),
+                        SelectionStrategy = new SentinelSetupSelectionStrategy(_logger)
                     }
                 };
 

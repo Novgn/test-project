@@ -71,7 +71,7 @@ export const Chat: React.FC = () => {
         } catch (error) {
           console.warn('Failed to create session via API, using local session:', error);
           // Use a local session if API is not available
-          storedSessionId = 'local-session-' + Date.now();
+          storedSessionId = 'session-' + Date.now();
           localStorage.setItem('chatSessionId', storedSessionId);
         }
       }
@@ -87,8 +87,8 @@ export const Chat: React.FC = () => {
         // Already handled with defaults in api.getAgents()
       }
 
-      // Load conversation history (only if not a local session)
-      if (!storedSessionId.startsWith('local-session-')) {
+      // Load conversation history (skip for brand new sessions to avoid errors)
+      if (storedSessionId && !storedSessionId.includes(Date.now().toString().substring(0, 8))) {
         try {
           const sessionData = await api.getConversation(storedSessionId);
           if (sessionData && sessionData.messages) {

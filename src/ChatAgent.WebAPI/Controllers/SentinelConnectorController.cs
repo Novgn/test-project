@@ -10,12 +10,12 @@ namespace ChatAgent.WebAPI.Controllers;
 [Route("api/[controller]")]
 public class SentinelConnectorController : ControllerBase
 {
-    private readonly SentinelConnectorGroupChatOrchestrator _orchestrator;
+    private readonly IOrchestrator _orchestrator;
     private readonly IHubContext<ChatHub> _hubContext;
     private readonly ILogger<SentinelConnectorController> _logger;
 
     public SentinelConnectorController(
-        SentinelConnectorGroupChatOrchestrator orchestrator,
+        IOrchestrator orchestrator,
         IHubContext<ChatHub> hubContext,
         ILogger<SentinelConnectorController> logger)
     {

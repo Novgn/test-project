@@ -9,8 +9,12 @@ import type { Agent, ChatMessage, Conversation } from '../types';
 
 /**
  * Configuration for the API service
+ * In development, use relative URLs to go through Vite proxy
+ * In production, use the environment variable or default
  */
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://localhost:7248';
+const API_BASE_URL = import.meta.env.DEV
+  ? '' // Empty string for relative URLs in development (uses Vite proxy)
+  : (import.meta.env.VITE_API_BASE_URL || 'https://localhost:7248');
 
 /**
  * Create axios instance with default configuration
@@ -176,29 +180,11 @@ export const api = {
    * Create a new conversation session
    */
   async createSession(): Promise<string> {
-    try {
-      interface SessionResponse {
-        sessionId: string;
-        configuration?: Record<string, unknown>;
-        specialists?: Array<{ name: string; role: string }>;
-        tip?: string;
-      }
-      // Start a new Sentinel connector session with default config
-      const response = await apiClient.post<SessionResponse>('/api/SentinelConnector/session/start', {
-        workspaceId: 'workspace-' + Date.now(),
-        tenantId: 'tenant-' + Date.now(),
-        subscriptionId: 'sub-' + Date.now(),
-        resourceGroupName: 'rg-sentinel',
-        logTypes: ['CloudTrail', 'VPCFlow', 'GuardDuty'],
-        awsRegion: 'us-east-1'
-      });
-
-      return response.data.sessionId;
-    } catch (error) {
-      console.error('Failed to create session:', error);
-      // Return a local session ID if API fails
-      return 'local-session-' + Date.now();
-    }
+    // For now, just generate a local session ID
+    // The backend will create the actual session when the first message is sent
+    const sessionId = 'session-' + Date.now();
+    console.log('Created new session:', sessionId);
+    return sessionId;
   },
 
   /**

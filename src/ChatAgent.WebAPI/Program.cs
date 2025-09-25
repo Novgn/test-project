@@ -20,9 +20,12 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+});
 
-// Configure CORS for React frontend
+// Configure CORS for React frontend and SignalR
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp",
@@ -32,11 +35,12 @@ builder.Services.AddCors(options =>
                     "http://localhost:3000",
                     "http://localhost:5173",
                     "https://localhost:3000",
-                    "https://localhost:5173")
-                .AllowAnyHeader()
+                    "https://localhost:5173",
+                    "http://127.0.0.1:5173",
+                    "http://127.0.0.1:3000")
                 .AllowAnyMethod()
-                .AllowCredentials()
-                .WithExposedHeaders("*");
+                .AllowAnyHeader()
+                .AllowCredentials();
         });
 });
 
@@ -82,7 +86,21 @@ builder.Services.AddSingleton(kernel);
 // Register repositories
 builder.Services.AddSingleton<IConversationRepository, InMemoryConversationRepository>();
 
-// Register the Sentinel Connector Group Chat Orchestrator
+// Register the new working Orchestrator
+builder.Services.AddSingleton(provider =>
+{
+    var kernel = provider.GetRequiredService<Kernel>();
+    var logger = provider.GetRequiredService<ILogger<Orchestrator>>();
+    var conversationRepo = provider.GetRequiredService<IConversationRepository>();
+
+    return new Orchestrator(
+        kernel,
+        logger,
+        conversationRepo,
+        provider);
+});
+
+// Also register the original SentinelConnectorGroupChatOrchestrator if needed
 builder.Services.AddSingleton(provider =>
 {
     var kernel = provider.GetRequiredService<Kernel>();
@@ -119,11 +137,13 @@ builder.Services.AddSingleton(provider =>
 builder.Services.AddSingleton(provider =>
     provider.GetRequiredService<ILoggerFactory>().CreateLogger<AzurePlugin>());
 
-// Register the orchestrator - use SentinelConnectorGroupChatOrchestrator as the primary
+// Register SimpleGroupChatOrchestrator for testing
+builder.Services.AddSingleton<SimpleGroupChatOrchestrator>();
+
+// Register the orchestrator - using the new working Orchestrator
 builder.Services.AddSingleton<IOrchestrator>(provider =>
 {
-    // Use the SentinelConnectorGroupChatOrchestrator which has the proper plugins configured
-    return provider.GetRequiredService<SentinelConnectorGroupChatOrchestrator>();
+    return provider.GetRequiredService<Orchestrator>();
 });
 
 
@@ -131,22 +151,28 @@ var app = builder.Build();
 
 // Configure the HTTP request pipeline
 
-// CORS must be early in the pipeline
-app.UseCors("AllowReactApp");
-
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
-
 // Only use HTTPS redirection in production
 if (!app.Environment.IsDevelopment())
 {
     app.UseHttpsRedirection();
 }
 
+// Swagger must come before routing
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+// Routing must come before CORS
+app.UseRouting();
+
+// CORS must come after UseRouting and before UseEndpoints
+app.UseCors("AllowReactApp");
+
 app.UseAuthorization();
+
+// Map endpoints after all middleware
 app.MapControllers();
 app.MapHub<ChatHub>("/chathub");
 
