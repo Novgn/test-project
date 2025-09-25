@@ -37,7 +37,14 @@ class SignalRService {
    * @param sessionId - Optional session ID to use for the connection
    */
   async connect(sessionId?: string): Promise<void> {
-    if (this.connection) {
+    // Prevent duplicate connections to the same session
+    if (this.connection && this.isConnected && this.currentSessionId === sessionId) {
+      console.log('Already connected to session:', sessionId);
+      return;
+    }
+
+    // Disconnect only if connected to a different session
+    if (this.connection && this.currentSessionId !== sessionId) {
       await this.disconnect();
     }
 

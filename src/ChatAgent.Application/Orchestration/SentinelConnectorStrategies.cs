@@ -277,7 +277,6 @@ public class SentinelSetupSelectionStrategy : SelectionStrategy
     private readonly ILogger? _logger;
     private readonly Dictionary<string, int> _agentPriorities;
     private string? _lastAgentName;
-    private int _roundRobinIndex = 0;
     private readonly Dictionary<string, int> _agentParticipationCount = new();
     private readonly Dictionary<string, int> _agentErrorCount = new();
     private bool _inErrorRecoveryMode = false;

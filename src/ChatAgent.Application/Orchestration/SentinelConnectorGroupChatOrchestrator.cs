@@ -14,58 +14,49 @@ namespace ChatAgent.Application.Orchestration;
 #pragma warning disable SKEXP0001, SKEXP0110 // Suppress experimental feature warnings
 
 /// <summary>
-/// Multi-agent group chat orchestrator for AWS-Azure Sentinel connector setup.
-/// Uses Semantic Kernel's AgentGroupChat for multi-agent collaboration.
+/// User-driven multi-agent system for AWS-Azure Sentinel connector setup.
+/// Allows users to directly interact with and coordinate agents.
 /// </summary>
-public class SentinelConnectorGroupChatOrchestrator
+public class SentinelConnectorGroupChatOrchestrator : IOrchestrator
 {
     private readonly Kernel _kernel;
     private readonly ILogger<SentinelConnectorGroupChatOrchestrator> _logger;
     private readonly Dictionary<string, ChatCompletionAgent> _agents = new();
     private readonly IServiceProvider? _serviceProvider;
-    private AgentGroupChat? _groupChat;
+    private readonly IConversationRepository _conversationRepository;
+    private readonly Dictionary<string, AgentGroupChat> _sessionGroupChats = new();
+    private readonly Dictionary<string, string> _sessionCurrentAgent = new();
 
     public SentinelConnectorGroupChatOrchestrator(
         Kernel kernel,
         ILogger<SentinelConnectorGroupChatOrchestrator> logger,
-        IEnumerable<IMcpToolProvider>? mcpToolProviders = null,
+        IConversationRepository conversationRepository,
         IServiceProvider? serviceProvider = null)
     {
         _kernel = kernel;
         _logger = logger;
+        _conversationRepository = conversationRepository;
         _serviceProvider = serviceProvider;
 
-        InitializeAgents(mcpToolProviders);
-        InitializeGroupChat();
+        InitializeAgents();
     }
 
     /// <summary>
     /// Initialize specialized agents for the Sentinel connector setup
     /// </summary>
-    private void InitializeAgents(
-        IEnumerable<IMcpToolProvider>? mcpToolProviders)
+    private void InitializeAgents()
     {
-        var providers = mcpToolProviders?.ToList() ?? [];
-
-        // 1. COORDINATOR AGENT - Orchestrates the entire setup process
+        // COORDINATOR AGENT - The primary interface with users
         var coordinatorKernel = _kernel.Clone();
-        var coordinatorProviders = providers.Where(p =>
-            p.Name.Contains("sentinel-connector-coordinator", StringComparison.OrdinalIgnoreCase)).ToList();
+        var coordinatorPlugin = _serviceProvider?.GetService<CoordinatorPlugin>();
 
-        if (coordinatorProviders.Any())
+        if (coordinatorPlugin != null)
         {
-            var coordinatorLogger = _serviceProvider?.GetService<ILogger<CoordinatorPlugin>>() ??
-                                   new Microsoft.Extensions.Logging.Abstractions.NullLogger<CoordinatorPlugin>();
-            var coordinatorPlugin = new CoordinatorPlugin(coordinatorProviders.FirstOrDefault(), coordinatorLogger);
             coordinatorKernel.Plugins.AddFromObject(coordinatorPlugin, "CoordinatorTools");
         }
         else
         {
-            // Use simulated plugin if no provider available
-            var coordinatorLogger = _serviceProvider?.GetService<ILogger<CoordinatorPlugin>>() ??
-                                   new Microsoft.Extensions.Logging.Abstractions.NullLogger<CoordinatorPlugin>();
-            var coordinatorPlugin = new CoordinatorPlugin(null, coordinatorLogger);
-            coordinatorKernel.Plugins.AddFromObject(coordinatorPlugin, "CoordinatorTools");
+            _logger.LogWarning("CoordinatorPlugin not available - CoordinatorAgent will have limited functionality");
         }
 
         _agents["coordinator"] = new ChatCompletionAgent
@@ -75,55 +66,75 @@ public class SentinelConnectorGroupChatOrchestrator
             Arguments = new KernelArguments(new OpenAIPromptExecutionSettings
             {
                 ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions,
-                Temperature = 0.2,
-                MaxTokens = 1000
+                Temperature = 0.3,
+                MaxTokens = 1200
             }),
-            Instructions = @"You are the master coordinator for setting up AWS-Azure Sentinel connector.
-                Your responsibilities:
-                1. Create and manage the overall setup plan
-                2. Validate prerequisites before starting
-                3. Coordinate the setup phases
-                4. Track progress and handle errors
-                5. Generate final setup report
+            Instructions = @"You are the Sentinel Connector Setup Coordinator - the PRIMARY interface with users.
 
-                CRITICAL: You have ONLY the CoordinatorTools plugin with these functions:
-                - ValidatePrerequisites(subscriptionId, tenantId, workspaceId)
-                - PlanConnectorSetup(logTypes, awsRegion)
-                - GenerateSetupReport(setupDetails)
+                YOUR ROLE:
+                1. You are the ONLY agent who talks directly to users
+                2. Coordinate with AzureAgent for all Azure/Sentinel operations
+                3. You DO NOT have direct access to Azure functions - only AzureAgent does
+                4. When users need Azure information, you MUST delegate to AzureAgent
 
-                The system will automatically invoke your functions via ToolCallBehavior.AutoInvokeKernelFunctions.
+                YOUR COORDINATOR TOOLS (you can call these directly):
+                - ValidatePrerequisites(subscriptionId, tenantId, workspaceId): Check requirements
+                - PlanConnectorSetup(logTypes, awsRegion): Create setup plan
+                - GenerateSetupReport(setupDetails): Produce final report
 
-                IMPORTANT RULES:
-                1. DO NOT try to call other agents (AwsAgent, AzureAgent) - they participate automatically
-                2. DO NOT generate JSON for function calls - let the system handle it
-                3. Simply use your functions naturally in conversation
-                4. Other agents will respond to your coordination automatically
+                AZURE OPERATIONS (delegate to AzureAgent):
+                - Finding connector solutions
+                - Checking installation status
+                - Any Azure resource queries
 
-                Start by calling ValidatePrerequisites with the configuration values.
-                Then call PlanConnectorSetup with the log types and region.
-                The other agents will see your plan and execute their parts.
-                End with GenerateSetupReport when everything is complete."
+                CRITICAL WORKFLOW:
+                1. User mentions AWS, connector, or solution: Say 'Let me find the AWS connector solution for you'
+                2. User provides all required info: Validate and plan setup
+                3. The selection strategy will automatically engage AzureAgent when needed
+                4. Always relay AzureAgent's technical findings to user
+
+                WHEN USER PROVIDES THESE DETAILS:
+                - Azure subscription ID
+                - Azure tenant ID
+                - Resource group name
+                - Workspace name
+                - AWS region
+                - Log type
+
+                YOU MUST:
+                1. Call ValidatePrerequisites with subscription, tenant, and workspace IDs
+                2. Call PlanConnectorSetup with log type and AWS region
+                3. Say 'Now I will find the AWS connector solution details for your workspace'
+                4. When AzureAgent returns (in the next message), share the solution details:
+                   - Solution ID
+                   - Solution Name
+                   - Version
+                   - Installation status
+
+                IMPORTANT:
+                - Do NOT try to call 'AzureAgent' as a function - it is not a function
+                - Just mention finding the solution, and the system will route to AzureAgent
+                - When you mention 'find', 'solution', or 'azure' the system engages AzureAgent automatically
+
+                NEVER:
+                - Keep asking for info already provided
+                - Try to find solutions yourself (only AzureAgent can)
+                - Skip engaging AzureAgent when Azure info is needed
+
+                Remember: You coordinate, AzureAgent executes Azure operations."
         };
 
-        // 2. AZURE AGENT - Handles Azure Sentinel operations
+        // AZURE AGENT - Handles Azure Sentinel operations
         var azureKernel = _kernel.Clone();
-        var azureProviders = providers.Where(p =>
-            p.Name.Contains("arm-api", StringComparison.OrdinalIgnoreCase)).ToList();
+        var azurePlugin = _serviceProvider?.GetService<AzurePlugin>();
 
-        if (azureProviders.Any())
+        if (azurePlugin != null)
         {
-            var azureLogger = _serviceProvider?.GetService<ILogger<AzurePlugin>>() ??
-                             new Microsoft.Extensions.Logging.Abstractions.NullLogger<AzurePlugin>();
-            var azurePlugin = new AzurePlugin(azureProviders.FirstOrDefault(), azureLogger);
             azureKernel.Plugins.AddFromObject(azurePlugin, "AzureTools");
         }
         else
         {
-            // Use simulated plugin if no provider available
-            var azureLogger = _serviceProvider?.GetService<ILogger<AzurePlugin>>() ??
-                             new Microsoft.Extensions.Logging.Abstractions.NullLogger<AzurePlugin>();
-            var azurePlugin = new AzurePlugin(null, azureLogger);
-            azureKernel.Plugins.AddFromObject(azurePlugin, "AzureTools");
+            _logger.LogWarning("AzurePlugin not available - AzureAgent will have limited functionality");
         }
 
         _agents["azure"] = new ChatCompletionAgent
@@ -136,167 +147,568 @@ public class SentinelConnectorGroupChatOrchestrator
                 Temperature = 0.2,
                 MaxTokens = 1000
             }),
-            Instructions = @"You are the Azure and Sentinel specialist agent.
-                Your responsibilities:
-                1. Deploy AWS connector solution from Content Hub
-                2. Configure data connectors in Sentinel
-                3. Set up authentication with AWS
-                4. Monitor connector status
+            Instructions = @"You are an Azure Sentinel technical specialist. You execute Azure operations autonomously.
 
-                CRITICAL: You have ONLY the AzureTools plugin with these functions:
-                - DeployAwsConnectorSolution(subscriptionId, resourceGroupName, workspaceId)
-                - ConfigureAwsDataConnector(workspaceId, connectorName, roleArn, sqsUrls)
-                - CheckConnectorStatus(workspaceId, connectorName)
+                YOUR AVAILABLE FUNCTION:
+                FindConnectorSolution - Finds Azure Sentinel connector solutions
 
-                The system will automatically invoke your functions via ToolCallBehavior.AutoInvokeKernelFunctions.
+                AUTONOMOUS BEHAVIOR:
+                When selected, immediately scan the ENTIRE conversation history for:
+                - Azure subscription ID (look for patterns like 'cf697e34-75ce-497c-a639-0099c2f02bf4')
+                - Resource group name (look for 'resource group' or 'resourceGroupName')
+                - Workspace name (look for 'workspace name' or 'log analytics workspace name', NOT the ID)
+                - Connector type (AWS, S3, CloudTrail all mean 'AWS')
 
-                IMPORTANT RULES:
-                1. DO NOT try to call other agents - they participate automatically
-                2. DO NOT generate JSON for function calls - let the system handle it
-                3. Extract parameters from the conversation context
-                4. Focus on Azure-specific tasks only
+                IMMEDIATE ACTION:
+                If you find ALL four parameters in the conversation, immediately call:
+                FindConnectorSolution with the parameters:
+                - connectorName: 'AWS'
+                - subscriptionId: [the subscription ID you found]
+                - resourceGroupName: [the resource group name you found]
+                - workspaceName: [the workspace name you found]
 
-                When you see AWS infrastructure details from AwsAgent (Role ARN, SQS URLs):
-                1. Deploy the AWS connector solution in Sentinel
-                2. Configure the data connector with the AWS resources
-                3. Verify the connection is working
-                4. Report status back to the conversation"
+                EXAMPLE from conversation:
+                'Azure subscription ID: cf697e34-75ce-497c-a639-0099c2f02bf4'
+                'Resource group name: urelmattis'
+                'Log analytics workspace name: test-workspace'
+
+                You would immediately call FindConnectorSolution with those exact values.
+
+                RESPONSE FORMAT:
+                After calling the function, report back with:
+                'Found AWS connector solution:
+                - Solution ID: [returned value]
+                - Solution Name: [returned value]
+                - Version: [returned value]
+                - Installation Status: [returned value]'
+
+                NEVER ask for information - extract it from conversation history.
+                ALWAYS act immediately when selected."
         };
 
-        // 3. AWS AGENT - Manages AWS infrastructure
-        var awsKernel = _kernel.Clone();
-        var awsProviders = providers.Where(p =>
-            p.Name.Contains("aws-infrastructure", StringComparison.OrdinalIgnoreCase)).ToList();
 
-        if (awsProviders.Any())
-        {
-            var awsLogger = _serviceProvider?.GetService<ILogger<AwsPlugin>>() ??
-                           new Microsoft.Extensions.Logging.Abstractions.NullLogger<AwsPlugin>();
-            var awsPlugin = new AwsPlugin(awsProviders.FirstOrDefault(), awsLogger);
-            awsKernel.Plugins.AddFromObject(awsPlugin, "AwsTools");
-        }
-        else
-        {
-            // Use simulated plugin if no provider available
-            var awsLogger = _serviceProvider?.GetService<ILogger<AwsPlugin>>() ??
-                           new Microsoft.Extensions.Logging.Abstractions.NullLogger<AwsPlugin>();
-            var awsPlugin = new AwsPlugin(null, awsLogger);
-            awsKernel.Plugins.AddFromObject(awsPlugin, "AwsTools");
-        }
 
-        _agents["aws"] = new ChatCompletionAgent
-        {
-            Name = "AwsAgent",
-            Kernel = awsKernel,
-            Arguments = new KernelArguments(new OpenAIPromptExecutionSettings
-            {
-                ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions,
-                Temperature = 0.2,
-                MaxTokens = 1000
-            }),
-            Instructions = @"You are the AWS infrastructure specialist agent.
-                Your responsibilities:
-                1. Create OIDC identity provider for Azure AD
-                2. Set up IAM roles with proper trust relationships
-                3. Create and configure S3 buckets for logs
-                4. Set up SQS queues for event notifications
-                5. Enable AWS logging services
-
-                CRITICAL: You have ONLY the AwsTools plugin with these functions:
-                - CreateOidcProvider(tenantId, region)
-                - CreateSentinelRole(tenantId, region)
-                - CreateS3BucketForLogs(bucketName, region, logType)
-                - CreateSqsQueue(queueName, region)
-                - EnableCloudTrail(trailName, s3BucketName, region)
-
-                The system will automatically invoke your functions via ToolCallBehavior.AutoInvokeKernelFunctions.
-
-                IMPORTANT RULES:
-                1. DO NOT try to call other agents - they participate automatically
-                2. DO NOT generate JSON for function calls - let the system handle it
-                3. Extract parameters from the conversation context
-                4. Focus on AWS-specific tasks only
-
-                When you see the setup plan from CoordinatorAgent, execute these steps:
-                1. Create OIDC provider using the tenantId
-                2. Create IAM role for Sentinel access
-                3. Create S3 buckets for each log type
-                4. Create SQS queues for each bucket
-                5. Enable the requested logging services
-
-                Report Role ARN and SQS URLs clearly so AzureAgent can configure the connector."
-        };
-
-        // 4. INTEGRATION AGENT - Connects AWS and Azure
-        var integrationKernel = _kernel.Clone();
-        _agents["integration"] = new ChatCompletionAgent
-        {
-            Name = "IntegrationAgent",
-            Kernel = integrationKernel,
-            Instructions = @"You are the integration specialist that connects AWS and Azure.
-                Your responsibilities:
-                1. Validate AWS resources are ready
-                2. Ensure Azure Sentinel is prepared
-                3. Map AWS log types to Sentinel tables
-                4. Test end-to-end connectivity
-                5. Troubleshoot connection issues
-
-                Work with outputs from both AzureAgent and AwsAgent to:
-                - Verify OIDC authentication works
-                - Confirm SQS queues are accessible from Azure
-                - Validate log format compatibility
-                - Test data ingestion pipeline
-
-                Report integration status and any issues to coordinator."
-        };
-
-        // 5. MONITOR AGENT - Validates and monitors the setup
-        var monitorKernel = _kernel.Clone();
-        _agents["monitor"] = new ChatCompletionAgent
-        {
-            Name = "MonitorAgent",
-            Kernel = monitorKernel,
-            Instructions = @"You are the monitoring and validation specialist.
-                Your responsibilities:
-                1. Verify all components are properly configured
-                2. Check data flow from AWS to Sentinel
-                3. Monitor ingestion rates and errors
-                4. Validate security configurations
-                5. Generate health reports
-
-                After setup completion:
-                - Confirm logs are appearing in Sentinel
-                - Check for any errors or warnings
-                - Validate data formats are correct
-                - Monitor initial ingestion performance
-
-                Report all findings to coordinator for final report."
-        };
 
         _logger.LogInformation("Initialized {Count} specialized agents for Sentinel connector setup", _agents.Count);
     }
 
     /// <summary>
-    /// Initialize the group chat with selection and termination strategies
+    /// Process a message from the user in a conversational manner
     /// </summary>
-    private void InitializeGroupChat()
+    public async Task<Domain.Entities.ChatMessage> ProcessMessageAsync(
+        string message,
+        string sessionId,
+        CancellationToken cancellationToken = default)
     {
-        // Create the group chat with all agents
-        _groupChat = new AgentGroupChat(_agents.Values.ToArray())
-        {
-            ExecutionSettings = new AgentGroupChatSettings
-            {
-                // Use custom selection strategy that ensures proper agent ordering
-                SelectionStrategy = new SentinelSetupSelectionStrategy(_logger),
+        _logger.LogInformation("Processing user message in session {SessionId}: {Message}", sessionId, message);
 
-                // Use custom termination strategy that handles errors and filters invalid function calls
-                TerminationStrategy = new SentinelSetupTerminationStrategy(
-                    maximumIterations: 50,
-                    logger: _logger)
+        var conversation = await GetOrCreateConversationAsync(sessionId, cancellationToken);
+        var userMessage = new Domain.Entities.ChatMessage(message, "user");
+        conversation.AddMessage(userMessage);
+
+        // Process the message conversationally
+        var response = await ProcessConversationalMessageAsync(message, sessionId, conversation, cancellationToken);
+
+        var assistantMessage = new Domain.Entities.ChatMessage(
+            response.Content,
+            "assistant",
+            response.AgentId);
+
+        conversation.AddMessage(assistantMessage);
+        await _conversationRepository.UpdateAsync(conversation, cancellationToken);
+
+        return assistantMessage;
+    }
+
+    private async Task<(string Content, string AgentId)> ProcessConversationalMessageAsync(
+        string message,
+        string sessionId,
+        Domain.Entities.Conversation conversation,
+        CancellationToken cancellationToken)
+    {
+        // Analyze the message to understand user intent
+        var intent = AnalyzeUserIntent(message, conversation);
+
+        switch (intent.Type)
+        {
+            case IntentType.AskForHelp:
+                return await GetConversationalHelpAsync(cancellationToken);
+
+            case IntentType.CheckStatus:
+                return await GetConversationalStatusAsync(sessionId, cancellationToken);
+
+            case IntentType.StartDeployment:
+                return await StartConversationalDeploymentAsync(message, sessionId, cancellationToken);
+
+            case IntentType.AWSConfiguration:
+                return await HandleAWSConversationAsync(message, sessionId, cancellationToken);
+
+            case IntentType.AzureConfiguration:
+                return await HandleAzureConversationAsync(message, sessionId, cancellationToken);
+
+            case IntentType.Validation:
+                return await HandleValidationConversationAsync(message, sessionId, cancellationToken);
+
+            case IntentType.Troubleshooting:
+                return await HandleTroubleshootingAsync(message, sessionId, cancellationToken);
+
+            case IntentType.GeneralQuestion:
+            default:
+                return await HandleGeneralConversationAsync(message, sessionId, conversation, cancellationToken);
+        }
+    }
+
+    private UserIntent AnalyzeUserIntent(string message, Domain.Entities.Conversation conversation)
+    {
+        var lowerMessage = message.ToLower();
+
+        // Check for help requests
+        if (lowerMessage.Contains("help") || lowerMessage.Contains("how do i") ||
+            lowerMessage.Contains("what can") || lowerMessage.Contains("guide me"))
+        {
+            return new UserIntent { Type = IntentType.AskForHelp };
+        }
+
+        // Check for status inquiries
+        if (lowerMessage.Contains("status") || lowerMessage.Contains("progress") ||
+            lowerMessage.Contains("where are we") || lowerMessage.Contains("what's done"))
+        {
+            return new UserIntent { Type = IntentType.CheckStatus };
+        }
+
+        // Check for deployment initiation
+        if (lowerMessage.Contains("start") || lowerMessage.Contains("begin") ||
+            lowerMessage.Contains("deploy") || lowerMessage.Contains("set up") ||
+            lowerMessage.Contains("configure sentinel connector"))
+        {
+            return new UserIntent { Type = IntentType.StartDeployment };
+        }
+
+        // Check for AWS-related topics
+        if (lowerMessage.Contains("aws") || lowerMessage.Contains("s3") ||
+            lowerMessage.Contains("iam") || lowerMessage.Contains("sqs") ||
+            lowerMessage.Contains("cloudtrail"))
+        {
+            return new UserIntent { Type = IntentType.AWSConfiguration };
+        }
+
+        // Check for Azure/Sentinel topics
+        if (lowerMessage.Contains("azure") || lowerMessage.Contains("sentinel") ||
+            lowerMessage.Contains("workspace") || lowerMessage.Contains("data connector"))
+        {
+            return new UserIntent { Type = IntentType.AzureConfiguration };
+        }
+
+        // Check for validation requests
+        if (lowerMessage.Contains("validate") || lowerMessage.Contains("verify") ||
+            lowerMessage.Contains("check") || lowerMessage.Contains("test"))
+        {
+            return new UserIntent { Type = IntentType.Validation };
+        }
+
+        // Check for troubleshooting
+        if (lowerMessage.Contains("error") || lowerMessage.Contains("problem") ||
+            lowerMessage.Contains("issue") || lowerMessage.Contains("not working") ||
+            lowerMessage.Contains("failed"))
+        {
+            return new UserIntent { Type = IntentType.Troubleshooting };
+        }
+
+        return new UserIntent { Type = IntentType.GeneralQuestion };
+    }
+
+    private Task<(string Content, string AgentId)> GetConversationalHelpAsync(
+        CancellationToken cancellationToken)
+    {
+        var helpText = @"I'm here to help you set up the AWS-Azure Sentinel connector! Here's what we can do together:
+
+🚀 **Getting Started**: Just tell me you want to 'start setting up the Sentinel connector' or 'begin deployment'
+
+💬 **Natural Conversation**: Talk to me naturally about what you need:
+   • 'I need to set up AWS resources for Sentinel'
+   • 'Help me configure the Azure side'
+   • 'Let's validate our setup'
+   • 'Can you check if everything is working?'
+
+📊 **Check Progress**: Ask me 'what's our status?' or 'how are we doing?'
+
+🔧 **Troubleshooting**: Tell me about any issues: 'I'm getting an error' or 'something's not working'
+
+👥 **Collaborative Work**: I can coordinate multiple specialists:
+   • AWS Infrastructure Expert
+   • Azure Sentinel Specialist
+   • Integration Expert
+   • Monitoring Specialist
+
+Just describe what you want to accomplish, and I'll engage the right experts to help!";
+
+        return Task.FromResult((helpText, "assistant"));
+    }
+
+    private Task<(string Content, string AgentId)> GetConversationalStatusAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Get actual status from deployment tracking
+        var status = GetCurrentDeploymentPhase(sessionId);
+
+        var statusMessage = $@"Let me check where we are in the deployment process...
+
+📍 **Current Status**: {status.Phase}
+
+✅ **Completed Steps**:
+{string.Join("\n", status.CompletedSteps.Select(s => $"   • {s}"))}
+
+⏳ **Next Steps**:
+{string.Join("\n", status.PendingSteps.Take(3).Select(s => $"   • {s}"))}
+
+{GetNextActionSuggestion(status)}
+
+Would you like to continue with the next step?";
+
+        return Task.FromResult((statusMessage, "coordinator"));
+    }
+
+    private async Task<(string Content, string AgentId)> StartConversationalDeploymentAsync(
+        string message,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Use the coordinator-controlled orchestration for deployment
+        return await CoordinatorControlledOrchestrationAsync(
+            "The user wants to start setting up the AWS-Azure Sentinel connector. Begin the deployment process by validating prerequisites and creating a setup plan.",
+            sessionId,
+            cancellationToken);
+    }
+
+    private async Task<(string Content, string AgentId)> HandleAWSConversationAsync(
+        string message,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Route AWS-related queries through the coordinator
+        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
+    }
+
+    private async Task<(string Content, string AgentId)> HandleAzureConversationAsync(
+        string message,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Route Azure-related queries through the coordinator
+        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
+    }
+
+    private async Task<(string Content, string AgentId)> HandleValidationConversationAsync(
+        string message,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Route validation requests through the coordinator
+        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
+    }
+
+    private async Task<(string Content, string AgentId)> HandleTroubleshootingAsync(
+        string message,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Route troubleshooting through the coordinator
+        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
+    }
+
+    private async Task<(string Content, string AgentId)> HandleGeneralConversationAsync(
+        string message,
+        string sessionId,
+        Domain.Entities.Conversation conversation,
+        CancellationToken cancellationToken)
+    {
+        // Use coordinator-controlled orchestration instead of free-form group chat
+        // The coordinator will manage all specialist interactions internally
+        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Implements a coordinator-controlled orchestration pattern where:
+    /// 1. Only the coordinator communicates with the user
+    /// 2. All agents share the same conversation history via group chat
+    /// 3. Agents can see all previous messages and context
+    /// </summary>
+    private async Task<(string Content, string AgentId)> CoordinatorControlledOrchestrationAsync(
+        string userMessage,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (!_agents.TryGetValue("coordinator", out var coordinator))
+        {
+            return ("I'm unable to access the coordinator agent. Please try again.", "system");
+        }
+
+        try
+        {
+            // Get or create the group chat for this session with shared history
+            // Check if chat exists and if it's been completed (terminated)
+            if (_sessionGroupChats.TryGetValue(sessionId, out var existingChat))
+            {
+                // Check if the chat has been completed/terminated
+                // If it has, we need to create a new one
+                bool isCompleted = false;
+                try
+                {
+                    // Try to check if we can still use the chat
+                    // The IsComplete property or similar would be ideal, but we'll handle the exception
+                    isCompleted = existingChat.IsComplete;
+                }
+                catch
+                {
+                    // If we can't check, assume it might be completed
+                    isCompleted = true;
+                }
+
+                if (isCompleted)
+                {
+                    // Remove the completed chat and create a new one
+                    _sessionGroupChats.Remove(sessionId);
+                    _logger.LogDebug("Previous chat was completed, creating new chat for session {SessionId}", sessionId);
+                }
+            }
+
+            if (!_sessionGroupChats.TryGetValue(sessionId, out var groupChat))
+            {
+                // Create a new group chat with coordinator and azure agents
+                var agentsForChat = new List<ChatCompletionAgent> { coordinator };
+
+                if (_agents.TryGetValue("azure", out var azureAgent))
+                {
+                    agentsForChat.Add(azureAgent);
+                }
+
+                groupChat = new AgentGroupChat(agentsForChat.ToArray())
+                {
+                    ExecutionSettings = new AgentGroupChatSettings
+                    {
+                        TerminationStrategy = new CoordinatorTerminationStrategy(),
+                        SelectionStrategy = new CoordinatorSelectionStrategy(_logger)
+                    }
+                };
+
+                _sessionGroupChats[sessionId] = groupChat;
+
+                // Load existing conversation history so agents see all context
+                var conversation = await _conversationRepository.GetBySessionIdAsync(sessionId, cancellationToken);
+                if (conversation != null && conversation.Messages.Any())
+                {
+                    foreach (var historicalMessage in conversation.Messages)
+                    {
+                        var role = historicalMessage.Role == "user" ? AuthorRole.User : AuthorRole.Assistant;
+                        var authorName = historicalMessage.Role == "user" ? "User" : historicalMessage.AgentId ?? "Coordinator";
+
+                        // Add all historical messages to group chat so agents have full context
+                        groupChat.AddChatMessage(new ChatMessageContent(role, historicalMessage.Content)
+                        {
+                            AuthorName = authorName
+                        });
+                    }
+                }
+            }
+
+            // Add the new user message to the shared history
+            groupChat.AddChatMessage(new ChatMessageContent(AuthorRole.User, userMessage)
+            {
+                AuthorName = "User"
+            });
+
+            // Process through group chat - all agents see the full conversation history
+            var coordinatorResponses = new List<string>();
+
+            try
+            {
+                await foreach (var response in groupChat.InvokeAsync(cancellationToken))
+                {
+                    if (response.AuthorName == "CoordinatorAgent" && !string.IsNullOrEmpty(response.Content))
+                    {
+                        coordinatorResponses.Add(response.Content);
+                    }
+
+                    _logger.LogDebug("[{Agent}]: {Content}", response.AuthorName, response.Content);
+                }
+            }
+            catch (KernelException kex) when (kex.Message.Contains("Chat has completed"))
+            {
+                // The chat was already completed, remove it and retry with a new chat
+                _logger.LogWarning("Chat was already completed for session {SessionId}, creating new chat", sessionId);
+                _sessionGroupChats.Remove(sessionId);
+
+                // Recursively call ourselves to create a new chat and process the message
+                return await CoordinatorControlledOrchestrationAsync(userMessage, sessionId, cancellationToken);
+            }
+
+            var finalResponse = coordinatorResponses.Any()
+                ? string.Join("\n", coordinatorResponses)
+                : "I'm processing your request. Please wait a moment.";
+
+            return (finalResponse, "coordinator");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in coordinator-controlled orchestration");
+            return ("I encountered an issue coordinating the response. Let me try a different approach.", "coordinator");
+        }
+    }
+
+    private async Task<(string Content, string AgentId)> SendToAgentAsync(
+        ChatCompletionAgent agent,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var agentMessage = new ChatMessageContent(AuthorRole.User, message);
+            var response = new List<string>();
+
+            await foreach (ChatMessageContent item in agent.InvokeAsync(agentMessage, cancellationToken: cancellationToken))
+            {
+                if (item?.Content != null)
+                {
+                    response.Add(item.Content);
+                }
+                if (response.Count > 0) break; // Take first response
+            }
+
+            var content = response.Count > 0 ? string.Join("\n", response) : "No response from agent";
+            return (content, agent.Name ?? "unknown");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error invoking agent {AgentName}", agent.Name);
+            return ($"Error: {ex.Message}", "system");
+        }
+    }
+
+    private enum IntentType
+    {
+        AskForHelp,
+        CheckStatus,
+        StartDeployment,
+        AWSConfiguration,
+        AzureConfiguration,
+        Validation,
+        Troubleshooting,
+        GeneralQuestion
+    }
+
+    private class UserIntent
+    {
+        public IntentType Type { get; set; }
+    }
+
+    private class DeploymentPhase
+    {
+        public string Phase { get; set; } = "Not Started";
+        public List<string> CompletedSteps { get; set; } = new();
+        public List<string> PendingSteps { get; set; } = new();
+    }
+
+    private DeploymentPhase GetCurrentDeploymentPhase(string sessionId)
+    {
+        // In production, this would retrieve actual status from storage
+        return new DeploymentPhase
+        {
+            Phase = "Ready to Start",
+            CompletedSteps = new List<string>(),
+            PendingSteps = new List<string>
+            {
+                "Validate prerequisites",
+                "Create AWS resources",
+                "Configure Azure Sentinel",
+                "Verify data flow"
             }
         };
+    }
 
-        _logger.LogInformation("Initialized group chat with custom Sentinel setup strategies");
+    private string GetNextActionSuggestion(DeploymentPhase status)
+    {
+        if (status.PendingSteps.Count == 0)
+            return "🎉 Great job! Your deployment is complete!";
+
+        var nextStep = status.PendingSteps.FirstOrDefault();
+        return nextStep switch
+        {
+            "Validate prerequisites" => "💡 Ready to validate? Just say 'let's validate the prerequisites' to begin.",
+            "Create AWS resources" => "💡 Shall we set up the AWS side? Say 'let's create the AWS resources' to continue.",
+            "Configure Azure Sentinel" => "💡 Time for Azure! Say 'configure Sentinel' to proceed.",
+            "Verify data flow" => "💡 Final step! Say 'verify everything is working' to test.",
+            _ => "💡 Ready for the next step when you are!"
+        };
+    }
+
+    private async Task<Domain.Entities.Conversation> GetOrCreateConversationAsync(
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        var conversation = await _conversationRepository.GetBySessionIdAsync(sessionId, cancellationToken);
+        if (conversation == null)
+        {
+            conversation = new Domain.Entities.Conversation(sessionId);
+            await _conversationRepository.CreateAsync(conversation, cancellationToken);
+        }
+        return conversation;
+    }
+
+    public async Task<Domain.Entities.Conversation> GetConversationAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        var conversation = await _conversationRepository.GetBySessionIdAsync(sessionId, cancellationToken);
+        return conversation ?? new Domain.Entities.Conversation(sessionId);
+    }
+
+    public Task<List<Domain.Entities.Agent>> GetAvailableAgentsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var agents = new List<Domain.Entities.Agent>();
+
+        foreach (var (key, agent) in _agents)
+        {
+            var domainAgent = new Domain.Entities.Agent(
+                key,
+                agent.Name ?? key,
+                agent.Instructions ?? string.Empty,
+                ChatAgent.Domain.Entities.AgentType.Tool);
+
+            // Add capabilities based on agent type
+            switch (key)
+            {
+                case "coordinator":
+                    domainAgent.AddCapability("validation");
+                    domainAgent.AddCapability("planning");
+                    domainAgent.AddCapability("reporting");
+                    break;
+                case "aws":
+                    domainAgent.AddCapability("oidc-setup");
+                    domainAgent.AddCapability("iam-roles");
+                    domainAgent.AddCapability("s3-buckets");
+                    domainAgent.AddCapability("sqs-queues");
+                    break;
+                case "azure":
+                    domainAgent.AddCapability("sentinel-config");
+                    domainAgent.AddCapability("data-connectors");
+                    domainAgent.AddCapability("arm-deployment");
+                    break;
+            }
+
+            agents.Add(domainAgent);
+        }
+
+        return Task.FromResult(agents);
+    }
+
+    public Task RegisterAgentAsync(
+        Domain.Entities.Agent agent,
+        CancellationToken cancellationToken = default)
+    {
+        // Not implementing dynamic agent registration for this specialized orchestrator
+        throw new NotImplementedException("Dynamic agent registration not supported");
     }
 
     /// <summary>
@@ -307,10 +719,18 @@ public class SentinelConnectorGroupChatOrchestrator
         Action<string, string, string>? progressCallback = null,
         CancellationToken cancellationToken = default)
     {
-        if (_groupChat == null)
+        // Create a new group chat for this setup execution
+        var groupChat = new AgentGroupChat(_agents.Values.ToArray())
         {
-            throw new InvalidOperationException("Group chat not initialized");
-        }
+            ExecutionSettings = new AgentGroupChatSettings
+            {
+                SelectionStrategy = new SentinelSetupSelectionStrategy(_logger),
+                TerminationStrategy = new RegexTerminationStrategy("SETUP COMPLETE|FINAL REPORT GENERATED")
+                {
+                    MaximumIterations = 10
+                }
+            }
+        };
 
         var responseBuilder = new System.Text.StringBuilder();
         var currentPhase = "validation";
@@ -318,10 +738,10 @@ public class SentinelConnectorGroupChatOrchestrator
         try
         {
             // Add initial message to chat
-            _groupChat.AddChatMessage(new ChatMessageContent(AuthorRole.User, setupMessage));
+            groupChat.AddChatMessage(new ChatMessageContent(AuthorRole.User, setupMessage));
 
             // Execute the group chat
-            await foreach (var message in _groupChat.InvokeAsync(cancellationToken))
+            await foreach (var message in groupChat.InvokeAsync(cancellationToken))
             {
                 var agentName = message.AuthorName ?? "Unknown";
                 var content = message.Content ?? string.Empty;
@@ -332,10 +752,7 @@ public class SentinelConnectorGroupChatOrchestrator
                 currentPhase = agentName switch
                 {
                     "CoordinatorAgent" => "validation",
-                    "AwsAgent" => "aws-setup",
                     "AzureAgent" => "azure-setup",
-                    "IntegrationAgent" => "integration",
-                    "MonitorAgent" => "monitoring",
                     _ => currentPhase
                 };
 
@@ -371,10 +788,18 @@ public class SentinelConnectorGroupChatOrchestrator
         SetupConfiguration configuration,
         CancellationToken cancellationToken = default)
     {
-        if (_groupChat == null)
+        // Create a new group chat for this setup execution
+        var groupChat = new AgentGroupChat(_agents.Values.ToArray())
         {
-            throw new InvalidOperationException("Group chat not initialized");
-        }
+            ExecutionSettings = new AgentGroupChatSettings
+            {
+                SelectionStrategy = new SentinelSetupSelectionStrategy(_logger),
+                TerminationStrategy = new RegexTerminationStrategy("SETUP COMPLETE|FINAL REPORT GENERATED")
+                {
+                    MaximumIterations = 10
+                }
+            }
+        };
 
         var setupResult = new SetupResult();
 
@@ -393,10 +818,10 @@ public class SentinelConnectorGroupChatOrchestrator
                 Please coordinate the complete setup process.";
 
             // Add initial message to chat
-            _groupChat.AddChatMessage(new ChatMessageContent(AuthorRole.User, initialMessage));
+            groupChat.AddChatMessage(new ChatMessageContent(AuthorRole.User, initialMessage));
 
             // Execute the group chat
-            await foreach (var message in _groupChat.InvokeAsync(cancellationToken))
+            await foreach (var message in groupChat.InvokeAsync(cancellationToken))
             {
                 _logger.LogDebug("[{Agent}]: {Content}",
                     message.AuthorName ?? "Unknown",
@@ -410,16 +835,16 @@ public class SentinelConnectorGroupChatOrchestrator
                     Timestamp = DateTime.UtcNow
                 });
 
-                // Check for specific outputs we need to capture
-                if (message.AuthorName == "AwsAgent" && message.Content?.Contains("roleArn") == true)
+                // Check for specific outputs we need to capture - from any agent
+                if (message.Content?.Contains("roleArn") == true)
                 {
-                    // Extract Role ARN from AWS agent response
+                    // Extract Role ARN from agent response
                     setupResult.AwsRoleArn = ExtractValue(message.Content, "roleArn");
                 }
 
-                if (message.AuthorName == "AwsAgent" && message.Content?.Contains("queueUrl") == true)
+                if (message.Content?.Contains("queueUrl") == true)
                 {
-                    // Extract SQS URLs from AWS agent response
+                    // Extract SQS URLs from agent response
                     var sqsUrl = ExtractValue(message.Content, "queueUrl");
                     if (!string.IsNullOrEmpty(sqsUrl))
                     {

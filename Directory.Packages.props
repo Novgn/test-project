@@ -38,13 +38,13 @@
     <PackageVersion Include="Azure.Identity" Version="1.16.0" />
 
     <!-- AWS SDK -->
-    <PackageVersion Include="AWSSDK.Core" Version="3.7.400.57" />
-    <PackageVersion Include="AWSSDK.S3" Version="3.7.405.10" />
-    <PackageVersion Include="AWSSDK.SQS" Version="3.7.400.57" />
-    <PackageVersion Include="AWSSDK.IdentityManagement" Version="3.7.401.21" />
-    <PackageVersion Include="AWSSDK.SecurityToken" Version="3.7.400.57" />
-    <PackageVersion Include="AWSSDK.CloudTrail" Version="3.7.400.57" />
-    <PackageVersion Include="AWSSDK.EC2" Version="3.7.405.7" />
+    <PackageVersion Include="AWSSDK.Core" Version="3.7.500" />
+    <PackageVersion Include="AWSSDK.S3" Version="3.7.500" />
+    <PackageVersion Include="AWSSDK.SQS" Version="3.7.500" />
+    <PackageVersion Include="AWSSDK.IdentityManagement" Version="3.7.500" />
+    <PackageVersion Include="AWSSDK.SecurityToken" Version="3.7.500" />
+    <PackageVersion Include="AWSSDK.CloudTrail" Version="3.7.500" />
+    <PackageVersion Include="AWSSDK.EC2" Version="3.7.500" />
 
     <!-- Azure Resource Management -->
     <PackageVersion Include="Azure.ResourceManager" Version="1.13.0" />

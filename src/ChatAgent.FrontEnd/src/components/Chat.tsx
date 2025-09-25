@@ -1,6 +1,6 @@
 /**
- * Main Chat component for interacting with the ChatAgent orchestrator
- * Provides the user interface for sending messages and viewing responses
+ * Main Chat component for conversational interaction with Sentinel Connector setup
+ * Provides a natural language interface for deploying AWS-Azure Sentinel connectors
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -28,12 +28,27 @@ export const Chat: React.FC = () => {
 
   // Initialize session and load agents on mount
   useEffect(() => {
-    initializeChat();
-    return () => {
-      // Cleanup on unmount
-      signalRService.disconnect();
+    let isInitialized = false;
+    let mounted = true;
+
+    const init = async () => {
+      // Prevent double initialization in React StrictMode
+      if (!isInitialized && mounted) {
+        isInitialized = true;
+        await initializeChat();
+      }
     };
-  }, []);
+
+    init();
+
+    return () => {
+      mounted = false;
+      // Only disconnect if actually connected
+      if (isConnected) {
+        signalRService.disconnect();
+      }
+    };
+  }, []); // Empty dependency array - only run once
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -47,10 +62,20 @@ export const Chat: React.FC = () => {
     try {
       // Create or get session ID
       let storedSessionId = localStorage.getItem('chatSessionId');
+
+      // Always try to create a new session if we don't have one
       if (!storedSessionId) {
-        storedSessionId = await api.createSession();
-        localStorage.setItem('chatSessionId', storedSessionId);
+        try {
+          storedSessionId = await api.createSession();
+          localStorage.setItem('chatSessionId', storedSessionId);
+        } catch (error) {
+          console.warn('Failed to create session via API, using local session:', error);
+          // Use a local session if API is not available
+          storedSessionId = 'local-session-' + Date.now();
+          localStorage.setItem('chatSessionId', storedSessionId);
+        }
       }
+
       setSessionId(storedSessionId);
 
       // Load available agents (optional - may not exist yet)
@@ -58,23 +83,34 @@ export const Chat: React.FC = () => {
         const agentsList = await api.getAgents();
         setAgents(agentsList);
       } catch (error) {
-        console.log('Agents endpoint not available yet');
+        console.log('Agents endpoint not available, using defaults');
+        // Already handled with defaults in api.getAgents()
       }
 
-      // Load conversation history
-      try {
-        const sessionData = await api.getConversation(storedSessionId);
-        if (sessionData && sessionData.messages) {
-          setMessages(sessionData.messages);
+      // Load conversation history (only if not a local session)
+      if (!storedSessionId.startsWith('local-session-')) {
+        try {
+          const sessionData = await api.getConversation(storedSessionId);
+          if (sessionData && sessionData.messages) {
+            setMessages(sessionData.messages);
+          }
+        } catch (error) {
+          console.log('No existing conversation for session:', storedSessionId);
         }
-      } catch (error) {
-        console.log('No existing conversation for session:', storedSessionId);
       }
 
       // Setup SignalR connection
-      await setupSignalR(storedSessionId);
+      try {
+        await setupSignalR(storedSessionId);
+      } catch (error) {
+        console.error('SignalR setup failed, continuing without real-time updates:', error);
+        // Continue without SignalR - messages will still work via API
+      }
     } catch (error) {
       console.error('Failed to initialize chat:', error);
+      // Set a basic session so the app can still function
+      const fallbackSessionId = 'fallback-session-' + Date.now();
+      setSessionId(fallbackSessionId);
     }
   };
 
@@ -227,6 +263,12 @@ export const Chat: React.FC = () => {
    */
   const getAgentName = (agentId?: string) => {
     if (!agentId) return 'System';
+    if (agentId === 'assistant') return 'Assistant';
+    if (agentId === 'coordinator') return 'Coordinator';
+    if (agentId === 'aws') return 'AWS Expert';
+    if (agentId === 'azure') return 'Azure Specialist';
+    if (agentId === 'integration') return 'Integration Expert';
+    if (agentId === 'monitor') return 'Monitor';
     const agent = agents.find(a => a.id === agentId);
     return agent?.name || agentId;
   };
@@ -235,13 +277,13 @@ export const Chat: React.FC = () => {
     <div className="chat-container">
       {/* Header */}
       <div className="chat-header">
-        <h1>ChatAgent Orchestrator</h1>
+        <h1>AWS-Azure Sentinel Connector Assistant</h1>
         <div className="header-controls">
           <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
             {isConnected ? '● Connected' : '○ Disconnected'}
           </div>
           <button onClick={clearConversation} className="clear-button">
-            Clear Chat
+            New Session
           </button>
         </div>
       </div>
@@ -293,38 +335,18 @@ export const Chat: React.FC = () => {
           type="text"
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-          placeholder="Type your message..."
-          disabled={isLoading || !isConnected}
+          onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+          placeholder="Ask me anything about setting up your Sentinel connector..."
+          disabled={isLoading}
           className="message-input"
         />
         <button
           onClick={sendMessage}
-          disabled={isLoading || !isConnected || !inputMessage.trim()}
+          disabled={isLoading || !inputMessage.trim()}
           className="send-button"
         >
-          {isLoading ? 'Sending...' : 'Send'}
+          {isLoading ? 'Thinking...' : 'Send'}
         </button>
-      </div>
-
-      {/* Agents List Sidebar */}
-      <div className="agents-sidebar">
-        <h3>Available Agents</h3>
-        {agents.map(agent => (
-          <div key={agent.id} className="agent-card">
-            <div className="agent-header">
-              <span className="agent-name">{agent.name}</span>
-              <span className={`agent-type ${agent.type.toLowerCase()}`}>
-                {agent.type}
-              </span>
-            </div>
-            <div className="agent-capabilities">
-              {agent.capabilities.map((cap, i) => (
-                <span key={i} className="capability-badge">{cap}</span>
-              ))}
-            </div>
-          </div>
-        ))}
       </div>
     </div>
   );

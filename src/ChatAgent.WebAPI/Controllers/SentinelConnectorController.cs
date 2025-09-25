@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using ChatAgent.Application.Orchestration;
 using ChatAgent.Infrastructure.SignalR;
+using ChatAgent.Domain.Interfaces;
 
 namespace ChatAgent.WebAPI.Controllers;
 
@@ -24,80 +25,33 @@ public class SentinelConnectorController : ControllerBase
     }
 
     /// <summary>
-    /// Start AWS-Azure Sentinel connector setup with real-time updates via SignalR
+    /// Send a conversational message to the assistant
     /// </summary>
-    [HttpPost("setup")]
-    public async Task<IActionResult> StartConnectorSetup([FromBody] SentinelConnectorSetupRequest request)
+    [HttpPost("chat/{sessionId}")]
+    public async Task<IActionResult> Chat(string sessionId, [FromBody] ChatRequest request)
     {
         try
         {
-            _logger.LogInformation("Starting Sentinel connector setup for workspace {WorkspaceId}", request.WorkspaceId);
+            _logger.LogInformation("User message for session {SessionId}: {Message}", sessionId, request.Message);
 
-            // Validate request
-            if (!ModelState.IsValid)
+            // Process the message conversationally
+            var response = await _orchestrator.ProcessMessageAsync(request.Message, sessionId);
+
+            // Send real-time update via SignalR
+            await _hubContext.Clients.Group(sessionId).SendAsync("assistantResponse", new
             {
-                return BadRequest(ModelState);
-            }
-
-            // Generate a session ID for this setup
-            var sessionId = $"sentinel-setup-{Guid.NewGuid()}";
-
-            // Send initial message to SignalR clients
-            await _hubContext.Clients.Group(sessionId).SendAsync("setupStarted", new
-            {
-                sessionId,
-                workspaceId = request.WorkspaceId,
-                message = "Starting AWS-Azure Sentinel connector setup..."
-            });
-
-            // Create configuration for the orchestrator
-            var configuration = new SetupConfiguration
-            {
-                WorkspaceId = request.WorkspaceId,
-                TenantId = request.TenantId,
-                SubscriptionId = request.SubscriptionId,
-                ResourceGroupName = request.ResourceGroupName,
-                LogTypes = request.LogTypes ?? new List<string> { "CloudTrail", "VPCFlow", "GuardDuty" },
-                AwsRegion = request.AwsRegion ?? "us-east-1"
-            };
-
-            // Start setup in background and stream updates via SignalR
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    // Use the real multi-agent orchestrator
-                    var result = await ExecuteRealOrchestratorSetup(configuration, sessionId);
-
-                    // Send completion message
-                    await _hubContext.Clients.Group(sessionId).SendAsync("setupCompleted", new
-                    {
-                        success = result.Success,
-                        connectorId = result.ConnectorId,
-                        roleArn = result.AwsRoleArn,
-                        sqsUrls = result.SqsUrls,
-                        message = result.Success
-                            ? "Sentinel connector setup completed successfully"
-                            : $"Setup failed: {result.ErrorMessage}"
-                    });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error during setup execution");
-                    await _hubContext.Clients.Group(sessionId).SendAsync("setupError", new
-                    {
-                        error = ex.Message,
-                        message = "An error occurred during setup"
-                    });
-                }
+                speaker = response.AgentId ?? "assistant",
+                message = response.Content,
+                timestamp = response.Timestamp,
+                isAgent = response.AgentId != "assistant" && response.AgentId != "system"
             });
 
             return Ok(new
             {
-                sessionId,
-                message = "Setup started. Connect to SignalR hub for real-time updates.",
-                signalRHub = "/chathub",
-                joinGroup = sessionId
+                success = true,
+                message = response.Content,
+                speaker = response.AgentId ?? "assistant",
+                timestamp = response.Timestamp
             });
         }
         catch (Exception ex)
@@ -113,113 +67,109 @@ public class SentinelConnectorController : ControllerBase
     }
 
     /// <summary>
-    /// Execute setup using the real multi-agent orchestrator
+    /// Start a new session for user-driven orchestration
     /// </summary>
-    private async Task<SetupResult> ExecuteRealOrchestratorSetup(
-        SetupConfiguration configuration,
-        string sessionId)
+    [HttpPost("session/start")]
+    public async Task<IActionResult> StartSession([FromBody] SessionStartRequest request)
     {
-        var result = new SetupResult();
-
         try
         {
-            _logger.LogInformation("Starting real multi-agent orchestrator for session {SessionId}", sessionId);
+            var sessionId = $"sentinel-{Guid.NewGuid().ToString().Substring(0, 8)}";
 
-            // Create a progress callback to send SignalR updates
-            Action<string, string, string> progressCallback = (phase, agent, message) =>
+            // Store configuration for this session (could be in memory cache or database)
+            // For now, we'll include it in the response for the client to track
+
+            await _hubContext.Clients.Group(sessionId).SendAsync("sessionStarted", new
             {
-                _hubContext.Clients.Group(sessionId).SendAsync("agentMessage", new
-                {
-                    agent,
-                    message,
-                    phase,
-                    timestamp = DateTime.UtcNow
-                }).Wait();
+                sessionId,
+                configuration = request,
+                welcomeMessage = @"Hello! I'm here to help you set up your AWS-Azure Sentinel connector. 🚀
 
-                // Also send phase updates when phase changes
-                _hubContext.Clients.Group(sessionId).SendAsync("phaseUpdate", new
-                {
-                    phase,
-                    message = $"{agent}: {message}",
-                    timestamp = DateTime.UtcNow
-                }).Wait();
-            };
+I'll guide you through the entire process step by step. We'll:
+1. Validate your prerequisites
+2. Set up AWS resources
+3. Configure Azure Sentinel
+4. Connect everything together
+5. Verify it's all working
 
-            // Build the setup request message for the orchestrator with structured data
-            var setupMessage = $@"Please set up an AWS-Azure Sentinel connector with the following configuration:
+You can talk to me naturally - just tell me what you'd like to do, ask questions, or say 'help' if you need guidance.
 
-                CONFIGURATION_JSON:
-                {{
-                    ""workspaceId"": ""{configuration.WorkspaceId}"",
-                    ""tenantId"": ""{configuration.TenantId}"",
-                    ""subscriptionId"": ""{configuration.SubscriptionId}"",
-                    ""resourceGroupName"": ""{configuration.ResourceGroupName}"",
-                    ""awsRegion"": ""{configuration.AwsRegion}"",
-                    ""logTypes"": [{string.Join(", ", configuration.LogTypes.Select(lt => $"\"{lt}\""))}]
-                }}
+Ready to begin? Just say 'let's start' or tell me what you'd like to do first!"
+            });
 
-                Execute the complete setup process including:
-                1. Validate prerequisites using the configuration above
-                2. Set up AWS infrastructure in region {configuration.AwsRegion}:
-                   - Create OIDC provider for tenant {configuration.TenantId}
-                   - Create IAM roles with proper trust relationships
-                   - Create S3 buckets for {string.Join(", ", configuration.LogTypes)} logs
-                   - Set up SQS queues for event notifications
-                3. Configure Azure Sentinel in subscription {configuration.SubscriptionId}:
-                   - Deploy connector solution to resource group {configuration.ResourceGroupName}
-                   - Configure data connector for workspace {configuration.WorkspaceId}
-                4. Establish integration between AWS and Azure
-                5. Set up monitoring and verify data flow
-                6. Generate final report with all created resources
-
-                IMPORTANT: Use the actual configuration values provided above when calling your tools.
-                When calling AWS tools, always include region: {configuration.AwsRegion}
-                When calling Azure tools, always include tenantId: {configuration.TenantId}, subscriptionId: {configuration.SubscriptionId}";
-
-            // Execute the orchestrator
-            var response = await _orchestrator.ExecuteSetupAsync(setupMessage, progressCallback);
-
-            // Parse the response to extract created resources
-            if (response != null)
+            return Ok(new
             {
-                // Try to extract key information from the response
-                result.Success = response.Contains("success", StringComparison.OrdinalIgnoreCase) ||
-                               response.Contains("completed", StringComparison.OrdinalIgnoreCase);
-
-                // Extract ARN if present (looking for patterns like arn:aws:iam::...)
-                var arnMatch = System.Text.RegularExpressions.Regex.Match(response, @"arn:aws:iam::[\d]+:role/[\w-]+");
-                if (arnMatch.Success)
+                sessionId,
+                configuration = request,
+                specialists = new[]
                 {
-                    result.AwsRoleArn = arnMatch.Value;
-                }
-
-                // Extract SQS URLs if present
-                var sqsMatches = System.Text.RegularExpressions.Regex.Matches(response, @"https://sqs\.[\w-]+\.amazonaws\.com/[\d]+/[\w-]+");
-                foreach (System.Text.RegularExpressions.Match match in sqsMatches)
-                {
-                    result.SqsUrls.Add(match.Value);
-                }
-
-                // Generate a connector ID
-                result.ConnectorId = $"AWS_Connector_{Guid.NewGuid().ToString().Substring(0, 8)}";
-                result.CompletedAt = DateTime.UtcNow;
-
-                _logger.LogInformation("Multi-agent orchestrator completed. Success: {Success}", result.Success);
-            }
-            else
-            {
-                result.Success = false;
-                result.ErrorMessage = "No response from orchestrator";
-            }
+                    new { name = "Coordinator", role = "Guides you through the process" },
+                    new { name = "AWS Expert", role = "Handles AWS infrastructure" },
+                    new { name = "Azure Specialist", role = "Configures Sentinel" },
+                    new { name = "Integration Expert", role = "Connects AWS and Azure" },
+                    new { name = "Monitor", role = "Validates and tests" }
+                },
+                tip = "Just chat naturally! For example: 'I need help setting up Sentinel to collect AWS CloudTrail logs'"
+            });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error executing real orchestrator setup");
-            result.Success = false;
-            result.ErrorMessage = ex.Message;
+            _logger.LogError(ex, "Error starting session");
+            return StatusCode(500, new { error = ex.Message });
         }
+    }
 
-        return result;
+    /// <summary>
+    /// Get available specialists and their roles
+    /// </summary>
+    [HttpGet("specialists")]
+    public async Task<IActionResult> GetSpecialists()
+    {
+        try
+        {
+            var agents = await _orchestrator.GetAvailableAgentsAsync();
+            var specialists = agents.Select(a => new
+            {
+                name = a.Name,
+                role = a.Description,
+                capabilities = a.Capabilities,
+                available = true
+            });
+            return Ok(specialists);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting agents");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Get conversation history for a session
+    /// </summary>
+    [HttpGet("session/{sessionId}/history")]
+    public async Task<IActionResult> GetSessionHistory(string sessionId)
+    {
+        try
+        {
+            var conversation = await _orchestrator.GetConversationAsync(sessionId);
+            return Ok(new
+            {
+                sessionId,
+                messages = conversation.Messages.Select(m => new
+                {
+                    speaker = m.Role == "user" ? "You" : (m.AgentId ?? "Assistant"),
+                    message = m.Content,
+                    timestamp = m.Timestamp,
+                    isUser = m.Role == "user"
+                })
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting session history");
+            return StatusCode(500, new { error = ex.Message });
+        }
     }
 
 
@@ -265,7 +215,7 @@ public class SentinelConnectorController : ControllerBase
     /// Get the status of an existing Sentinel connector
     /// </summary>
     [HttpGet("status/{connectorId}")]
-    public async Task<IActionResult> GetConnectorStatus(string connectorId)
+    public Task<IActionResult> GetConnectorStatus(string connectorId)
     {
         try
         {
@@ -281,23 +231,28 @@ public class SentinelConnectorController : ControllerBase
                 note = "Requires Azure credentials and connector ID from actual deployment"
             };
 
-            return Ok(status);
+            return Task.FromResult<IActionResult>(Ok(status));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting connector status");
-            return StatusCode(500, new
+            return Task.FromResult<IActionResult>(StatusCode(500, new
             {
                 success = false,
                 message = "Error retrieving connector status",
                 error = ex.Message
-            });
+            }));
         }
     }
 }
 
 // Request DTOs
-public class SentinelConnectorSetupRequest
+public class ChatRequest
+{
+    public required string Message { get; set; }
+}
+
+public class SessionStartRequest
 {
     public required string WorkspaceId { get; set; }
     public required string TenantId { get; set; }

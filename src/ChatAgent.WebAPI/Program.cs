@@ -1,9 +1,11 @@
 using Microsoft.SemanticKernel;
 using ChatAgent.Application.Orchestration;
 using ChatAgent.Application.Plugins;
+using ChatAgent.Application.Plugins.Azure;
+using ChatAgent.Application.Plugins.Coordinator;
+using ChatAgent.Application.Tools.Azure;
+using ChatAgent.Application.Tools.Coordinator;
 using ChatAgent.Domain.Interfaces;
-using ChatAgent.Infrastructure.McpTools;
-using ChatAgent.Infrastructure.McpTools.SentinelConnector;
 using ChatAgent.Infrastructure.Repositories;
 using ChatAgent.Infrastructure.SignalR;
 using Azure.Identity;
@@ -41,11 +43,6 @@ builder.Services.AddCors(options =>
 // ===== Configure Semantic Kernel =====
 var kernelBuilder = Kernel.CreateBuilder();
 
-// Check if we're using Azure OpenAI or OpenAI directly
-// var useAzureOpenAI = builder.Configuration.GetValue<bool>("AzureOpenAI:Enabled", false);
-
-// if (useAzureOpenAI)
-// {
 // Azure OpenAI configuration
 var endpoint = builder.Configuration["AzureOpenAI:Endpoint"];
 var deploymentName = builder.Configuration["AzureOpenAI:DeploymentName"];
@@ -72,36 +69,6 @@ kernelBuilder.Services.AddAzureOpenAIChatCompletion(
     modelId: "gpt-4",
     endpoint: endpoint,
     apiKey: apiKey);
-// }
-// else
-// {
-//     // Standard OpenAI configuration
-//     var apiKeySecretName = builder.Configuration["OpenAI:ApiKeySecretName"] ?? "OpenAIApiKey";
-//     var openAiApiKey = builder.Configuration[apiKeySecretName]; // Direct secret name
-
-//     // If not found by secret name, try nested configuration key
-//     if (string.IsNullOrEmpty(openAiApiKey))
-//     {
-//         openAiApiKey = builder.Configuration["OpenAI:ApiKey"];
-//     }
-
-//     // If not in Key Vault, fallback to environment variable for local development
-//     if (string.IsNullOrEmpty(openAiApiKey))
-//     {
-//         openAiApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-//     }
-
-//     // Validate API key is available
-//     if (string.IsNullOrEmpty(openAiApiKey))
-//     {
-//         throw new InvalidOperationException(
-//             "OpenAI API Key not configured. Please set it in Azure Key Vault or as an environment variable.");
-//     }
-
-//     kernelBuilder.Services.AddOpenAIChatCompletion(
-//         modelId: builder.Configuration["OpenAI:Model"] ?? "gpt-4",
-//         apiKey: openAiApiKey);
-// }
 
 kernelBuilder.Services.AddLogging(loggingBuilder =>
 {
@@ -115,85 +82,50 @@ builder.Services.AddSingleton(kernel);
 // Register repositories
 builder.Services.AddSingleton<IConversationRepository, InMemoryConversationRepository>();
 
-// ===== Configure MCP Tool Providers =====
-// Example: File system MCP server using npx
-builder.Services.AddSingleton<IMcpToolProvider>(provider =>
-{
-    var logger = provider.GetRequiredService<ILogger<McpServerToolProvider>>();
-
-    return new McpServerToolProvider(
-        "filesystem",
-        "File system operations MCP server",
-        "npx",
-        new[] { "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
-        logger);
-});
-
-// Example: Everything MCP server (includes multiple tools)
-builder.Services.AddSingleton<IMcpToolProvider>(provider =>
-{
-    var logger = provider.GetRequiredService<ILogger<McpServerToolProvider>>();
-
-    return new McpServerToolProvider(
-        "everything",
-        "MCP server with multiple tools",
-        "npx",
-        new[] { "-y", "@modelcontextprotocol/server-everything" },
-        logger);
-});
-
-// ===== Register Sentinel Connector MCP Tool Providers =====
-// ARM API Tool Provider for Azure operations
-builder.Services.AddHttpClient("ArmApi");
-builder.Services.AddSingleton<IMcpToolProvider, ArmApiToolProvider>();
-
-// AWS Infrastructure Tool Provider
-builder.Services.AddSingleton<IMcpToolProvider, AwsInfrastructureToolProvider>();
-
-// Sentinel Connector Coordinator Tool Provider
-builder.Services.AddSingleton<IMcpToolProvider, SentinelConnectorCoordinatorToolProvider>();
-
 // Register the Sentinel Connector Group Chat Orchestrator
-builder.Services.AddSingleton<SentinelConnectorGroupChatOrchestrator>(provider =>
+builder.Services.AddSingleton(provider =>
 {
     var kernel = provider.GetRequiredService<Kernel>();
     var logger = provider.GetRequiredService<ILogger<SentinelConnectorGroupChatOrchestrator>>();
-    var mcpProviders = provider.GetServices<IMcpToolProvider>();
+    var conversationRepo = provider.GetRequiredService<IConversationRepository>();
 
     return new SentinelConnectorGroupChatOrchestrator(
         kernel,
         logger,
-        mcpProviders,
+        conversationRepo,
         provider);
 });
 
-// Register the MCP tool plugin
-builder.Services.AddSingleton<McpToolPlugin>();
+// Register Coordinator plugin and handlers
+builder.Services.AddSingleton<ValidatePrerequisitesHandler>();
+builder.Services.AddSingleton<PlanConnectorSetupHandler>();
+builder.Services.AddSingleton<GenerateSetupReportHandler>();
+builder.Services.AddSingleton(provider =>
+    new CoordinatorToolHandlers(
+        provider.GetRequiredService<ValidatePrerequisitesHandler>(),
+        provider.GetRequiredService<PlanConnectorSetupHandler>(),
+        provider.GetRequiredService<GenerateSetupReportHandler>()));
+builder.Services.AddSingleton<CoordinatorPlugin>();
+
+// Register Azure plugin and handlers
+builder.Services.AddSingleton<FindConnectorSolutionHandler>();
+builder.Services.AddSingleton(provider =>
+    new AzureToolHandlers(provider.GetRequiredService<FindConnectorSolutionHandler>()));
+builder.Services.AddSingleton<AzurePlugin>();
 
 // Register plugin loggers
-builder.Services.AddSingleton<ILogger<CoordinatorPlugin>>(provider =>
+builder.Services.AddSingleton(provider =>
     provider.GetRequiredService<ILoggerFactory>().CreateLogger<CoordinatorPlugin>());
-builder.Services.AddSingleton<ILogger<AzurePlugin>>(provider =>
+builder.Services.AddSingleton(provider =>
     provider.GetRequiredService<ILoggerFactory>().CreateLogger<AzurePlugin>());
-builder.Services.AddSingleton<ILogger<AwsPlugin>>(provider =>
-    provider.GetRequiredService<ILoggerFactory>().CreateLogger<AwsPlugin>());
 
-// Register the orchestrator with MCP support
+// Register the orchestrator - use SentinelConnectorGroupChatOrchestrator as the primary
 builder.Services.AddSingleton<IOrchestrator>(provider =>
 {
-    var kernel = provider.GetRequiredService<Kernel>();
-    var conversationRepo = provider.GetRequiredService<IConversationRepository>();
-    var logger = provider.GetRequiredService<ILogger<SemanticKernelOrchestrator>>();
-    var mcpProviders = provider.GetServices<IMcpToolProvider>();
-    var mcpPluginLogger = provider.GetRequiredService<ILogger<McpToolPlugin>>();
-
-    return new SemanticKernelOrchestrator(
-        kernel,
-        conversationRepo,
-        logger,
-        mcpProviders,
-        mcpPluginLogger);
+    // Use the SentinelConnectorGroupChatOrchestrator which has the proper plugins configured
+    return provider.GetRequiredService<SentinelConnectorGroupChatOrchestrator>();
 });
+
 
 var app = builder.Build();
 

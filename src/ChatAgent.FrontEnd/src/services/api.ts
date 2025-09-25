@@ -1,6 +1,6 @@
 /**
- * API Service for communicating with the ChatAgent backend
- * Handles all HTTP requests to the orchestrator endpoints
+ * API Service for communicating with the Sentinel Connector backend
+ * Handles all HTTP requests for conversational deployment assistance
  */
 
 import axios from 'axios';
@@ -65,11 +65,34 @@ apiClient.interceptors.response.use(
  */
 export const api = {
   /**
-   * Get all available agents with their capabilities
+   * Get all available specialists and their roles
    */
   async getAgents(): Promise<Agent[]> {
-    const response = await apiClient.get<Agent[]>('/api/agents');
-    return response.data;
+    try {
+      interface SpecialistResponse {
+        name: string;
+        role: string;
+        capabilities?: string[];
+        available?: boolean;
+      }
+      const response = await apiClient.get<SpecialistResponse[]>('/api/SentinelConnector/specialists');
+      // Map the response to Agent type
+      return response.data.map(specialist => ({
+        id: specialist.name.toLowerCase().replace(' ', ''),
+        name: specialist.name,
+        type: 'Specialist' as const,
+        description: specialist.role,
+        capabilities: specialist.capabilities || []
+      }));
+    } catch (error) {
+      console.error('Failed to get specialists:', error);
+      // Return default specialists if API fails
+      return [
+        { id: 'coordinator', name: 'Coordinator', type: 'Coordinator', description: 'Guides the setup process', capabilities: [] },
+        { id: 'aws', name: 'AWS Expert', type: 'Specialist', description: 'AWS infrastructure', capabilities: [] },
+        { id: 'azure', name: 'Azure Specialist', type: 'Specialist', description: 'Azure Sentinel configuration', capabilities: [] },
+      ];
+    }
   },
 
   /**
@@ -81,37 +104,113 @@ export const api = {
   },
 
   /**
-   * Send a message to the orchestrator and get a response
+   * Send a conversational message to the assistant
    */
   async sendMessage(sessionId: string, message: string): Promise<ChatMessage> {
-    const response = await apiClient.post<ChatMessage>('/api/chat', {
-      sessionId,
-      message,
-    });
-    return response.data;
+    try {
+      interface ChatResponse {
+        message?: string;
+        response?: string;
+        speaker?: string;
+        agent?: string;
+        timestamp?: string;
+      }
+      const response = await apiClient.post<ChatResponse>(`/api/SentinelConnector/chat/${sessionId}`, {
+        message,
+      });
+
+      // Map response to ChatMessage type
+      return {
+        content: response.data.message || response.data.response || '',
+        role: 'assistant',
+        agentId: response.data.speaker || response.data.agent,
+        timestamp: response.data.timestamp || new Date().toISOString(),
+      };
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      throw error;
+    }
   },
 
   /**
    * Get conversation history for a session
    */
   async getConversation(sessionId: string): Promise<Conversation> {
-    const response = await apiClient.get<Conversation>(`/api/sessions/${sessionId}`);
-    return response.data;
+    try {
+      interface HistoryResponse {
+        sessionId: string;
+        messages: Array<{
+          message?: string;
+          content?: string;
+          isUser?: boolean;
+          speaker?: string;
+          timestamp: string;
+        }>;
+      }
+      const response = await apiClient.get<HistoryResponse>(`/api/SentinelConnector/session/${sessionId}/history`);
+
+      // Map response to Conversation type
+      return {
+        sessionId: response.data.sessionId,
+        messages: response.data.messages.map((msg) => ({
+          content: msg.message || msg.content || '',
+          role: msg.isUser ? 'user' : 'assistant' as const,
+          agentId: msg.speaker === 'You' ? undefined : msg.speaker,
+          timestamp: msg.timestamp
+        })),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('Failed to get conversation:', error);
+      return {
+        sessionId,
+        messages: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+    }
   },
 
   /**
    * Create a new conversation session
    */
   async createSession(): Promise<string> {
-    const response = await apiClient.post<{ id: string }>('/api/sessions');
-    return response.data.id;
+    try {
+      interface SessionResponse {
+        sessionId: string;
+        configuration?: Record<string, unknown>;
+        specialists?: Array<{ name: string; role: string }>;
+        tip?: string;
+      }
+      // Start a new Sentinel connector session with default config
+      const response = await apiClient.post<SessionResponse>('/api/SentinelConnector/session/start', {
+        workspaceId: 'workspace-' + Date.now(),
+        tenantId: 'tenant-' + Date.now(),
+        subscriptionId: 'sub-' + Date.now(),
+        resourceGroupName: 'rg-sentinel',
+        logTypes: ['CloudTrail', 'VPCFlow', 'GuardDuty'],
+        awsRegion: 'us-east-1'
+      });
+
+      return response.data.sessionId;
+    } catch (error) {
+      console.error('Failed to create session:', error);
+      // Return a local session ID if API fails
+      return 'local-session-' + Date.now();
+    }
   },
 
   /**
    * Clear conversation history for a session
    */
   async clearConversation(sessionId: string): Promise<void> {
-    await apiClient.put(`/api/sessions/${sessionId}/end`);
+    try {
+      await apiClient.put(`/api/sessions/${sessionId}/end`);
+    } catch (error) {
+      console.error('Failed to clear conversation:', error);
+      // Continue anyway - we'll create a new session
+    }
   },
 
   /**

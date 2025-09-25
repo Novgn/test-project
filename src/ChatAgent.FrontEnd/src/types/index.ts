@@ -12,6 +12,7 @@ export interface Agent {
   description: string;
   type: 'Coordinator' | 'Tool' | 'Specialist';
   capabilities: string[];
+  status?: string;
 }
 
 /**
