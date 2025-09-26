@@ -2,8 +2,10 @@ using Microsoft.SemanticKernel;
 using ChatAgent.Application.Orchestration;
 using ChatAgent.Application.Plugins;
 using ChatAgent.Application.Plugins.Azure;
+using ChatAgent.Application.Plugins.AWS;
 using ChatAgent.Application.Plugins.Coordinator;
 using ChatAgent.Application.Tools.Azure;
+using ChatAgent.Application.Tools.AWS;
 using ChatAgent.Application.Tools.Coordinator;
 using ChatAgent.Domain.Interfaces;
 using ChatAgent.Infrastructure.Repositories;
@@ -127,9 +129,60 @@ builder.Services.AddSingleton<CoordinatorPlugin>();
 
 // Register Azure plugin and handlers
 builder.Services.AddSingleton<FindConnectorSolutionHandler>();
+builder.Services.AddSingleton<InstallConnectorSolutionHandler>();
 builder.Services.AddSingleton(provider =>
-    new AzureToolHandlers(provider.GetRequiredService<FindConnectorSolutionHandler>()));
+    new AzureToolHandlers(
+        provider.GetRequiredService<FindConnectorSolutionHandler>(),
+        provider.GetRequiredService<InstallConnectorSolutionHandler>()));
 builder.Services.AddSingleton<AzurePlugin>();
+
+// Register AWS SDK clients
+builder.Services.AddSingleton<Amazon.IdentityManagement.IAmazonIdentityManagementService>(provider =>
+{
+    var config = new Amazon.IdentityManagement.AmazonIdentityManagementServiceConfig();
+    // Configure region if needed from configuration
+    var region = builder.Configuration["AWS:Region"];
+    if (!string.IsNullOrEmpty(region))
+    {
+        config.RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+    }
+    return new Amazon.IdentityManagement.AmazonIdentityManagementServiceClient(config);
+});
+
+builder.Services.AddSingleton<Amazon.S3.IAmazonS3>(provider =>
+{
+    var config = new Amazon.S3.AmazonS3Config();
+    // Configure region if needed from configuration
+    var region = builder.Configuration["AWS:Region"];
+    if (!string.IsNullOrEmpty(region))
+    {
+        config.RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+    }
+    return new Amazon.S3.AmazonS3Client(config);
+});
+
+builder.Services.AddSingleton<Amazon.SQS.IAmazonSQS>(provider =>
+{
+    var config = new Amazon.SQS.AmazonSQSConfig();
+    // Configure region if needed from configuration
+    var region = builder.Configuration["AWS:Region"];
+    if (!string.IsNullOrEmpty(region))
+    {
+        config.RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+    }
+    return new Amazon.SQS.AmazonSQSClient(config);
+});
+
+// Register AWS plugin and handlers
+builder.Services.AddSingleton<CreateAWSRoleHandler>();
+builder.Services.AddSingleton<ConfigureS3BucketHandler>();
+builder.Services.AddSingleton<SetupSQSQueueHandler>();
+builder.Services.AddSingleton(provider =>
+    new AWSToolHandlers(
+        provider.GetRequiredService<CreateAWSRoleHandler>(),
+        provider.GetRequiredService<ConfigureS3BucketHandler>(),
+        provider.GetRequiredService<SetupSQSQueueHandler>()));
+builder.Services.AddSingleton<AWSPlugin>();
 
 // Register plugin loggers
 builder.Services.AddSingleton(provider =>

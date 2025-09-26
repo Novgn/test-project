@@ -96,6 +96,7 @@ public class Orchestrator : IOrchestrator
 
                 YOUR PRIMARY ROLE:
                 - Guide users through the Sentinel connector setup process
+                - Coordinate between finding, installing, and configuring connectors
                 - Provide clear, step-by-step instructions
                 - Answer questions about both AWS and Azure aspects
                 - Help troubleshoot any issues
@@ -104,6 +105,13 @@ public class Orchestrator : IOrchestrator
                 - ValidatePrerequisites: Check if all requirements are met
                 - PlanConnectorSetup: Create a detailed setup plan
                 - GenerateSetupReport: Provide a comprehensive report
+
+                PROCESS FLOW:
+                1. Use Azure agent to find available connector solutions
+                2. Present options to the user if multiple solutions exist
+                3. Use Azure agent to install the selected solution
+                4. Guide configuration of data connectors
+                5. Verify successful installation and data flow
 
                 COMMUNICATION STYLE:
                 - Be concise but informative
@@ -150,6 +158,7 @@ public class Orchestrator : IOrchestrator
 
                 AVAILABLE TOOLS:
                 - FindConnectorSolution: Search for available Sentinel connectors
+                - InstallConnectorSolution: Install solutions from Content Hub into workspaces
 
                 RESPONSE STYLE:
                 - Provide Azure-specific technical details when relevant
@@ -166,6 +175,19 @@ public class Orchestrator : IOrchestrator
 
         _agents["azure"] = azureAgent;
 
+        // AWS AGENT - Add AWS plugin for enhanced functionality
+        var awsPlugin = _serviceProvider?.GetService<AWSPlugin>();
+
+        if (awsPlugin != null)
+        {
+            _kernel.Plugins.AddFromObject(awsPlugin, "AWSTools");
+            _logger.LogInformation("AWSPlugin added successfully");
+        }
+        else
+        {
+            _logger.LogWarning("AWSPlugin not available - AWSAgent will have limited functionality");
+        }
+
         // Enhanced AWS agent with specific expertise
         var awsAgent = new ChatCompletionAgent
         {
@@ -180,6 +202,12 @@ public class Orchestrator : IOrchestrator
                 - SNS/SQS configuration for event streaming
                 - AWS Security Hub integration
 
+                AVAILABLE TOOLS:
+                - CreateAWSRole: Create IAM roles with trust policies for Microsoft Sentinel
+                - ConfigureS3Bucket: Set up S3 buckets for log collection
+                - SetupSQSQueue: Configure SQS queues for real-time event notifications
+                - GenerateAWSSetupSummary: Provide comprehensive setup summaries
+
                 RESPONSE STYLE:
                 - Focus on AWS-side requirements and configuration
                 - Provide specific IAM policy examples when needed
@@ -188,6 +216,7 @@ public class Orchestrator : IOrchestrator
             Kernel = _kernel,
             Arguments = new KernelArguments(new OpenAIPromptExecutionSettings
             {
+                ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions,
                 Temperature = 0.3,
                 MaxTokens = 600
             })

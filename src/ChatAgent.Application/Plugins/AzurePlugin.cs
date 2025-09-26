@@ -21,7 +21,7 @@ public class AzurePlugin
     [KernelFunction("FindConnectorSolution")]
     [Description("Finds a suitable Azure Connector solution based on the provided requirements.")]
     public async Task<FindConnectorSolution.Output> FindConnectorSolutionAsync(
-        [Description("Name of the connector to find (e.g., 'AWS', 'Amazon Web Services')")] string connectorName,
+        [Description("Name of the connector to find (e.g., 'AWS', 'Amazon Web Services', 'Office 365', 'Azure Activity')")] string connectorName,
         [Description("Azure subscription ID")] string subscriptionId,
         [Description("Azure resource group name")] string resourceGroupName,
         [Description("Microsoft Sentinel workspace name")] string workspaceName,
@@ -37,5 +37,31 @@ public class AzurePlugin
         _logger.LogInformation("Finding connector solution for: {ConnectorName} in workspace: {WorkspaceName}",
             connectorName, workspaceName);
         return await _toolHandlers.FindConnectorSolutionHandler.HandleAsync(input, cancellationToken);
+    }
+
+    [KernelFunction("InstallConnectorSolution")]
+    [Description("Installs a connector solution from Microsoft Sentinel Content Hub into the specified workspace.")]
+    public async Task<InstallConnectorSolution.Output> InstallConnectorSolutionAsync(
+        [Description("Solution ID from Content Hub (e.g., 'azuresentinel.azure-sentinel-solution-amazonwebservices')")] string solutionId,
+        [Description("Azure subscription ID")] string subscriptionId,
+        [Description("Azure resource group name")] string resourceGroupName,
+        [Description("Microsoft Sentinel workspace name")] string workspaceName,
+        [Description("Version to install (default: 'latest')")] string version = "latest",
+        [Description("Enable data connectors after installation (default: true)")] bool enableDataConnectors = true,
+        CancellationToken cancellationToken = default)
+    {
+        var input = new InstallConnectorSolution.Input(
+            SolutionId: solutionId,
+            SubscriptionId: subscriptionId,
+            ResourceGroupName: resourceGroupName,
+            WorkspaceName: workspaceName,
+            Version: version,
+            EnableDataConnectors: enableDataConnectors,
+            Parameters: null
+        );
+
+        _logger.LogInformation("Installing solution: {SolutionId} in workspace: {WorkspaceName}",
+            solutionId, workspaceName);
+        return await _toolHandlers.InstallConnectorSolutionHandler.HandleAsync(input, cancellationToken);
     }
 }
