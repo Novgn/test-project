@@ -1,3 +1,4 @@
+/* ARCHIVED - No longer in use
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using ChatAgent.Application.Orchestration;
@@ -281,4 +282,4 @@ public class SetupResult
     public List<string> SqsUrls { get; set; } = new();
     public string? ErrorMessage { get; set; }
     public DateTime? CompletedAt { get; set; }
-}
+}*/

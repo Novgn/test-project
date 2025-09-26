@@ -79,7 +79,7 @@ export const api = {
         capabilities?: string[];
         available?: boolean;
       }
-      const response = await apiClient.get<SpecialistResponse[]>('/api/SentinelConnector/specialists');
+      const response = await apiClient.get<SpecialistResponse[]>('/api/Chat/specialists');
       // Map the response to Agent type
       return response.data.map(specialist => ({
         id: specialist.name.toLowerCase().replace(' ', ''),
@@ -119,7 +119,7 @@ export const api = {
         agent?: string;
         timestamp?: string;
       }
-      const response = await apiClient.post<ChatResponse>(`/api/SentinelConnector/chat/${sessionId}`, {
+      const response = await apiClient.post<ChatResponse>(`/api/Chat/chat/${sessionId}`, {
         message,
       });
 
@@ -151,7 +151,7 @@ export const api = {
           timestamp: string;
         }>;
       }
-      const response = await apiClient.get<HistoryResponse>(`/api/SentinelConnector/session/${sessionId}/history`);
+      const response = await apiClient.get<HistoryResponse>(`/api/Chat/session/${sessionId}/history`);
 
       // Map response to Conversation type
       return {

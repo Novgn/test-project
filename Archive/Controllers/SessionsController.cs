@@ -1,3 +1,4 @@
+/* ARCHIVED - No longer in use
 using Microsoft.AspNetCore.Mvc;
 using ChatAgent.Domain.Interfaces;
 using ChatAgent.Domain.Entities;
@@ -101,4 +102,4 @@ namespace ChatAgent.WebAPI.Controllers
             return Ok();
         }
     }
-}
+}*/

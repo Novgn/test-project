@@ -1,3 +1,4 @@
+/* ARCHIVED - No longer in use
 using Microsoft.SemanticKernel.Agents.Orchestration.GroupChat;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.Extensions.Logging;
@@ -236,4 +237,4 @@ public class CoordinatorGroupChatManager : GroupChatManager
     }
 }
 
-#pragma warning restore SKEXP0001, SKEXP0110
+#pragma warning restore SKEXP0001, SKEXP0110*/

@@ -1,11 +1,10 @@
 using System.ComponentModel;
-using ChatAgent.Application.Plugins.Azure;
 using ChatAgent.Application.Tools;
 using ChatAgent.Application.Tools.Azure;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 
-namespace ChatAgent.Application.Plugins;
+namespace ChatAgent.Application.Plugins.Azure;
 
 public class AzurePlugin
 {

@@ -2,6 +2,8 @@ using Microsoft.Extensions.Logging;
 using Azure.Identity;
 using Azure.ResourceManager;
 using Azure.ResourceManager.OperationalInsights;
+using Azure.ResourceManager.Resources;
+using Azure.ResourceManager.Resources.Models;
 using Azure.Core;
 using Azure;
 using System.Net.Http.Headers;
@@ -19,7 +21,7 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
         CancellationToken cancellationToken = default)
     {
         _logger.LogInformation(
-            "Checking solution '{SolutionId}' in workspace '{WorkspaceName}'",
+            "Installing solution '{SolutionId}' in workspace '{WorkspaceName}'",
             input.SolutionId,
             input.WorkspaceName);
 
@@ -80,7 +82,7 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
                 );
             }
 
-            // 3. Get access token
+            // 3. Get access token for API calls
             var scopes = new[] { "https://management.azure.com/.default" };
             var accessToken = await credential.GetTokenAsync(
                 new TokenRequestContext(scopes),
@@ -159,61 +161,236 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
                 }
             }
 
-            // 5. Provide installation instructions
-            // Note: Automated installation of Content Hub solutions requires complex ARM template orchestration
-            // For now, we'll provide manual instructions
+            // 5. Get the solution package to retrieve the ARM template
+            _logger.LogInformation("Retrieving solution package for {SolutionId}", input.SolutionId);
 
-            var portalUrl = $"https://portal.azure.com/#blade/Microsoft_Azure_Security_Insights/ContentHubBlade" +
-                $"/subscriptionId/{input.SubscriptionId}" +
-                $"/resourceGroup/{input.ResourceGroupName}" +
-                $"/workspaceName/{input.WorkspaceName}";
+            // Get product package details
+            var packageUrl = $"https://management.azure.com/subscriptions/{input.SubscriptionId}" +
+                $"/resourceGroups/{input.ResourceGroupName}" +
+                $"/providers/Microsoft.OperationalInsights/workspaces/{input.WorkspaceName}" +
+                $"/providers/Microsoft.SecurityInsights/contentProductPackages/{input.SolutionId}?api-version=2024-09-01";
 
-            var instructions = $@"
-To install the solution '{input.SolutionId}', please follow these steps:
+            var packageResponse = await _httpClient.GetAsync(packageUrl, cancellationToken);
 
-1. Open Microsoft Sentinel Content Hub:
-   {portalUrl}
-
-2. Search for the solution:
-   - In the search box, type: {GetSolutionDisplayName(input.SolutionId)}
-   - Select the solution from the list
-
-3. Click 'Install' or 'Create'
-
-4. Follow the installation wizard:
-   - Select your subscription: {input.SubscriptionId}
-   - Select your resource group: {input.ResourceGroupName}
-   - Select your workspace: {input.WorkspaceName}
-   - Review and create
-
-Alternative: Use Azure CLI or PowerShell for automated deployment.
-
-For AWS connector specifically:
-- Solution Name: Amazon Web Services
-- After installation, configure:
-  - AWS Role ARN
-  - S3 bucket details
-  - SQS queue URLs
-";
-
-            // Add specific configuration requirements based on solution type
-            if (input.SolutionId.Contains("aws", StringComparison.OrdinalIgnoreCase) ||
-                input.SolutionId.Contains("amazon", StringComparison.OrdinalIgnoreCase))
+            if (!packageResponse.IsSuccessStatusCode)
             {
-                configurationRequired["AWS Role ARN"] = "Required for cross-account access";
-                configurationRequired["S3 Bucket"] = "Required for log storage";
-                configurationRequired["SQS Queue"] = "Required for event notifications";
+                _logger.LogWarning("Failed to retrieve package details for {SolutionId}. Trying template approach.", input.SolutionId);
+
+                // Try to get the template directly
+                var templateUrl = $"https://management.azure.com/subscriptions/{input.SubscriptionId}" +
+                    $"/resourceGroups/{input.ResourceGroupName}" +
+                    $"/providers/Microsoft.OperationalInsights/workspaces/{input.WorkspaceName}" +
+                    $"/providers/Microsoft.SecurityInsights/contentProductTemplates/{input.SolutionId}?api-version=2024-09-01";
+
+                packageResponse = await _httpClient.GetAsync(templateUrl, cancellationToken);
             }
 
-            return new InstallConnectorSolution.Output(
-                Success: false,
-                OperationId: string.Empty,
-                Status: "ManualInstallationRequired",
-                Message: instructions,
-                InstalledComponents: installedComponents,
-                EnabledDataConnectors: enabledDataConnectors,
-                ConfigurationRequired: configurationRequired.Any() ? configurationRequired : null
-            );
+            if (!packageResponse.IsSuccessStatusCode)
+            {
+                return new InstallConnectorSolution.Output(
+                    Success: false,
+                    OperationId: string.Empty,
+                    Status: "PackageNotFound",
+                    Message: $"Could not retrieve solution package for {input.SolutionId}. Error: {packageResponse.StatusCode}",
+                    InstalledComponents: installedComponents,
+                    EnabledDataConnectors: enabledDataConnectors,
+                    ConfigurationRequired: null
+                );
+            }
+
+            var packageContent = await packageResponse.Content.ReadAsStringAsync(cancellationToken);
+            var packageData = JsonDocument.Parse(packageContent);
+
+            // 6. Extract the mainTemplate from the package
+            string? mainTemplate = null;
+            if (packageData.RootElement.TryGetProperty("properties", out var packageProps) &&
+                packageProps.TryGetProperty("mainTemplate", out var templateElement))
+            {
+                mainTemplate = templateElement.GetRawText();
+            }
+
+            if (string.IsNullOrEmpty(mainTemplate))
+            {
+                _logger.LogWarning("No mainTemplate found in package response. Attempting Content Hub installation approach.");
+
+                // Try to install via Content Hub API directly
+                var installUrl = $"https://management.azure.com/subscriptions/{input.SubscriptionId}" +
+                    $"/resourceGroups/{input.ResourceGroupName}" +
+                    $"/providers/Microsoft.OperationalInsights/workspaces/{input.WorkspaceName}" +
+                    $"/providers/Microsoft.SecurityInsights/contentProductPackages/{input.SolutionId}" +
+                    $"/install?api-version=2024-09-01";
+
+                var installRequest = new HttpRequestMessage(HttpMethod.Post, installUrl);
+                installRequest.Headers.Authorization = _httpClient.DefaultRequestHeaders.Authorization;
+
+                var installResponse = await _httpClient.SendAsync(installRequest, cancellationToken);
+
+                if (installResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("Solution installation initiated via Content Hub for {SolutionId}", input.SolutionId);
+
+                    return new InstallConnectorSolution.Output(
+                        Success: true,
+                        OperationId: input.SolutionId,
+                        Status: "InstallationInitiated",
+                        Message: $@"Solution installation has been initiated through Content Hub.
+
+Please follow these steps to complete the setup:
+1. Go to Azure Sentinel → Content Hub
+2. Search for the solution and verify it shows as 'Installed'
+3. Navigate to Data Connectors
+4. Find and configure the AWS connector
+5. You'll need:
+   - AWS Role ARN (will be created in next steps)
+   - SQS URL (will be created in next steps)
+   - Destination table: Usually 'AWSCloudTrail'",
+                        InstalledComponents: installedComponents,
+                        EnabledDataConnectors: enabledDataConnectors,
+                        ConfigurationRequired: new Dictionary<string, string>
+                        {
+                            ["AWS Role ARN"] = "Required - will be created in AWS setup",
+                            ["SQS Queue URL"] = "Required - will be created in AWS setup",
+                            ["Destination Table"] = "AWSCloudTrail (default)"
+                        }
+                    );
+                }
+                else
+                {
+                    var errorContent = await installResponse.Content.ReadAsStringAsync(cancellationToken);
+                    _logger.LogError("Failed to install via Content Hub: {Error}", errorContent);
+
+                    return new InstallConnectorSolution.Output(
+                        Success: false,
+                        OperationId: string.Empty,
+                        Status: "ManualInstallationRequired",
+                        Message: $@"Unable to install this solution programmatically.
+
+Please install manually through the Azure Portal:
+1. Navigate to Microsoft Sentinel → Content Hub
+2. Search for '{input.SolutionId}'
+3. Click on the solution and select 'Install'
+4. Follow the installation wizard
+5. Once installed, return here to continue with AWS configuration
+
+Error details: {installResponse.StatusCode}",
+                        InstalledComponents: installedComponents,
+                        EnabledDataConnectors: enabledDataConnectors,
+                        ConfigurationRequired: null
+                    );
+                }
+            }
+
+            // 7. Deploy the ARM template
+            _logger.LogInformation("Deploying ARM template for solution {SolutionId}", input.SolutionId);
+
+            var deploymentName = $"deploy-{input.SolutionId}-{DateTime.UtcNow:yyyyMMddHHmmss}";
+            var deploymentProperties = new ArmDeploymentProperties(ArmDeploymentMode.Incremental)
+            {
+                Template = BinaryData.FromString(mainTemplate),
+                Parameters = BinaryData.FromObjectAsJson(new
+                {
+                    workspace = new
+                    {
+                        value = new
+                        {
+                            id = workspace.Value.Id.ToString(),
+                            name = input.WorkspaceName,
+                            location = workspace.Value.Data.Location.ToString()
+                        }
+                    },
+                    location = new { value = workspace.Value.Data.Location.ToString() }
+                })
+            };
+
+            var deploymentContent = new ArmDeploymentContent(deploymentProperties);
+
+            // Deploy at resource group level
+            var deploymentCollection = resourceGroup.Value.GetArmDeployments();
+            var deploymentOperation = await deploymentCollection.CreateOrUpdateAsync(
+                WaitUntil.Started,
+                deploymentName,
+                deploymentContent,
+                cancellationToken);
+
+            // Wait for deployment to complete (with timeout)
+            var deploymentCompleted = await WaitForDeploymentAsync(
+                deploymentOperation.Value,
+                TimeSpan.FromMinutes(10),
+                cancellationToken);
+
+            if (!deploymentCompleted)
+            {
+                return new InstallConnectorSolution.Output(
+                    Success: false,
+                    OperationId: deploymentName,
+                    Status: "DeploymentTimeout",
+                    Message: "Deployment timed out. Check Azure portal for deployment status.",
+                    InstalledComponents: installedComponents,
+                    EnabledDataConnectors: enabledDataConnectors,
+                    ConfigurationRequired: null
+                );
+            }
+
+            // Check deployment status
+            var deployment = deploymentOperation.Value;
+            deployment = await deployment.GetAsync(cancellationToken);
+
+            if (deployment.Data.Properties.ProvisioningState == ResourcesProvisioningState.Succeeded)
+            {
+                _logger.LogInformation("Successfully deployed solution {SolutionId}", input.SolutionId);
+
+                // Add specific configuration requirements based on solution type
+                if (input.SolutionId.Contains("aws", StringComparison.OrdinalIgnoreCase) ||
+                    input.SolutionId.Contains("amazon", StringComparison.OrdinalIgnoreCase))
+                {
+                    configurationRequired["AWS Role ARN"] = "Required for cross-account access";
+                    configurationRequired["S3 Bucket"] = "Required for log storage";
+                    configurationRequired["SQS Queue"] = "Required for event notifications";
+                }
+
+                // Get outputs from deployment if any
+                if (deployment.Data.Properties.Outputs != null)
+                {
+                    try
+                    {
+                        var outputs = deployment.Data.Properties.Outputs.ToObjectFromJson<Dictionary<string, object>>();
+                        if (outputs != null)
+                        {
+                            foreach (var output in outputs)
+                            {
+                                installedComponents.Add($"Output: {output.Key}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to parse deployment outputs");
+                    }
+                }
+
+                return new InstallConnectorSolution.Output(
+                    Success: true,
+                    OperationId: deploymentName,
+                    Status: "Succeeded",
+                    Message: $"Successfully installed solution {input.SolutionId}",
+                    InstalledComponents: installedComponents,
+                    EnabledDataConnectors: enabledDataConnectors,
+                    ConfigurationRequired: configurationRequired.Count > 0 ? configurationRequired : null
+                );
+            }
+            else
+            {
+                var errorMessage = deployment.Data.Properties.Error?.Message ?? "Deployment failed";
+                return new InstallConnectorSolution.Output(
+                    Success: false,
+                    OperationId: deploymentName,
+                    Status: deployment.Data.Properties.ProvisioningState?.ToString() ?? "Failed",
+                    Message: $"Deployment failed: {errorMessage}",
+                    InstalledComponents: installedComponents,
+                    EnabledDataConnectors: enabledDataConnectors,
+                    ConfigurationRequired: null
+                );
+            }
         }
         catch (AuthenticationFailedException ex)
         {
@@ -230,7 +407,7 @@ For AWS connector specifically:
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error");
+            _logger.LogError(ex, "Unexpected error installing solution");
             return new InstallConnectorSolution.Output(
                 Success: false,
                 OperationId: string.Empty,
@@ -243,21 +420,32 @@ For AWS connector specifically:
         }
     }
 
-    private static string GetSolutionDisplayName(string solutionId)
+    private async Task<bool> WaitForDeploymentAsync(
+        ArmDeploymentResource deployment,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
-        // Map common solution IDs to display names
-        if (solutionId.Contains("amazonwebservices", StringComparison.OrdinalIgnoreCase))
-            return "Amazon Web Services";
-        if (solutionId.Contains("office365", StringComparison.OrdinalIgnoreCase))
-            return "Office 365";
-        if (solutionId.Contains("azureactivity", StringComparison.OrdinalIgnoreCase))
-            return "Azure Activity";
-        if (solutionId.Contains("threatintelligence", StringComparison.OrdinalIgnoreCase))
-            return "Threat Intelligence";
+        var startTime = DateTime.UtcNow;
 
-        // Default: clean up the ID
-        return solutionId.Replace("azuresentinel.azure-sentinel-solution-", "")
-            .Replace("-", " ")
-            .Replace("_", " ");
+        while (DateTime.UtcNow - startTime < timeout)
+        {
+            deployment = await deployment.GetAsync(cancellationToken);
+
+            var state = deployment.Data.Properties.ProvisioningState;
+            if (state == ResourcesProvisioningState.Succeeded ||
+                state == ResourcesProvisioningState.Failed ||
+                state == ResourcesProvisioningState.Canceled)
+            {
+                return true;
+            }
+
+            _logger.LogDebug("Deployment {Name} is in state {State}. Waiting...",
+                deployment.Data.Name,
+                state);
+
+            await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+        }
+
+        return false;
     }
 }

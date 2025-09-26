@@ -1,10 +1,9 @@
 using System.ComponentModel;
-using ChatAgent.Application.Plugins.Coordinator;
 using ChatAgent.Application.Tools.Coordinator;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 
-namespace ChatAgent.Application.Plugins;
+namespace ChatAgent.Application.Plugins.Coordinator;
 
 public class CoordinatorPlugin
 {

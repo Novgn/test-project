@@ -4,17 +4,14 @@ namespace ChatAgent.Application.Plugins.AWS;
 
 public sealed class AWSToolHandlers
 {
-    public CreateAWSRoleHandler CreateAWSRoleHandler { get; }
-    public ConfigureS3BucketHandler ConfigureS3BucketHandler { get; }
-    public SetupSQSQueueHandler SetupSQSQueueHandler { get; }
+    public SetupAWSAuthHandler SetupAWSAuthHandler { get; }
+    public SetupAWSInfraHandler SetupAWSInfraHandler { get; }
 
     public AWSToolHandlers(
-        CreateAWSRoleHandler createAWSRoleHandler,
-        ConfigureS3BucketHandler configureS3BucketHandler,
-        SetupSQSQueueHandler setupSQSQueueHandler)
+        SetupAWSAuthHandler setupAWSAuthHandler,
+        SetupAWSInfraHandler setupAWSInfraHandler)
     {
-        CreateAWSRoleHandler = createAWSRoleHandler;
-        ConfigureS3BucketHandler = configureS3BucketHandler;
-        SetupSQSQueueHandler = setupSQSQueueHandler;
+        SetupAWSAuthHandler = setupAWSAuthHandler;
+        SetupAWSInfraHandler = setupAWSInfraHandler;
     }
 }

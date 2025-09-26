@@ -4,17 +4,32 @@ using ChatAgent.Domain.Interfaces;
 
 namespace ChatAgent.Infrastructure.SignalR;
 
-public class ChatHub : Hub
+/// <summary>
+/// SignalR Hub for real-time chat communication
+///
+/// Client Events (sent to frontend):
+/// - Connected: Initial connection confirmation with sessionId
+/// - ReceiveMessage: Chat message from agents/orchestrator
+/// - Processing: Indicates message is being processed
+/// - Error: Error messages
+/// - SessionUpdated: Session ID was updated
+/// - ConversationHistory: Full conversation history
+/// - AvailableAgents: List of available agents/specialists
+/// - JoinedGroup/LeftGroup: Group membership confirmations
+///
+/// Server Methods (callable from frontend):
+/// - SetSessionId(sessionId): Set/update session ID
+/// - SendMessage(message): Send chat message
+/// - GetConversationHistory(): Get full history
+/// - GetAvailableAgents(): Get list of agents
+/// - JoinGroup(groupName): Join a SignalR group
+/// - LeaveGroup(groupName): Leave a SignalR group
+/// </summary>
+public class ChatHub(IOrchestrator orchestrator, ILogger<ChatHub> logger) : Hub
 {
-    private readonly IOrchestrator _orchestrator;
-    private readonly ILogger<ChatHub> _logger;
-    private static readonly Dictionary<string, string> _connectionToSession = new();
-
-    public ChatHub(IOrchestrator orchestrator, ILogger<ChatHub> logger)
-    {
-        _orchestrator = orchestrator;
-        _logger = logger;
-    }
+    private readonly IOrchestrator _orchestrator = orchestrator;
+    private readonly ILogger<ChatHub> _logger = logger;
+    private static readonly Dictionary<string, string> _connectionToSession = [];
 
     public override async Task OnConnectedAsync()
     {
@@ -72,7 +87,7 @@ public class ChatHub : Hub
 
         // Verify the conversation exists or create it
         var conversation = await _orchestrator.GetConversationAsync(sessionId);
-        if (conversation == null)
+        if (conversation is null)
         {
             _logger.LogInformation("Creating conversation for session {SessionId}", sessionId);
             // The orchestrator will create it on first message
@@ -86,6 +101,9 @@ public class ChatHub : Hub
         });
     }
 
+    /// <summary>
+    /// Process a message from the client through the orchestrator
+    /// </summary>
     public async Task SendMessage(string message)
     {
         if (!_connectionToSession.TryGetValue(Context.ConnectionId, out var sessionId))
@@ -96,20 +114,25 @@ public class ChatHub : Hub
 
         try
         {
+            // Log preview of message for debugging
+            var messagePreview = message.Length <= 50 ? message : $"{message[..50]}...";
             _logger.LogDebug("Processing message from session {SessionId}: {Message}",
-                sessionId, message.Substring(0, Math.Min(50, message.Length)));
+                sessionId, messagePreview);
 
+            // Notify client that processing has started
             await Clients.Caller.SendAsync("Processing", new
             {
                 status = "processing",
                 timestamp = DateTime.UtcNow
             });
 
+            // Process through orchestrator
             var response = await _orchestrator.ProcessMessageAsync(message, sessionId);
 
+            // Send response back to client
             await Clients.Caller.SendAsync("ReceiveMessage", new
             {
-                content = response.Content,  // Changed from 'message' to 'content'
+                content = response.Content,
                 role = response.Role,
                 agentId = response.AgentId,
                 timestamp = response.Timestamp,
@@ -156,6 +179,9 @@ public class ChatHub : Hub
         }
     }
 
+    /// <summary>
+    /// Get list of available agents/specialists
+    /// </summary>
     public async Task GetAvailableAgents()
     {
         try

@@ -1,15 +1,15 @@
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Agents;
-using Microsoft.SemanticKernel.Agents.Orchestration;
 using Microsoft.SemanticKernel.Agents.Orchestration.GroupChat;
 using Microsoft.SemanticKernel.Agents.Runtime.InProcess;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using Microsoft.Extensions.Logging;
 using ChatAgent.Domain.Interfaces;
-using ChatAgent.Application.Plugins;
 using Microsoft.Extensions.DependencyInjection;
-using System.Text.Json;
+using ChatAgent.Application.Plugins.Azure;
+using ChatAgent.Application.Plugins.Coordinator;
+using ChatAgent.Application.Plugins.AWS;
 
 namespace ChatAgent.Application.Orchestration;
 
@@ -74,17 +74,23 @@ public class Orchestrator : IOrchestrator
             _logger.LogInformation("Shared kernel has chat service: {ServiceType}", chatService.GetType().Name);
         }
 
-        // Add coordinator plugin for enhanced functionality
-        var coordinatorPlugin = _serviceProvider?.GetService<CoordinatorPlugin>();
-
-        if (coordinatorPlugin != null)
+        // Add coordinator plugin for enhanced functionality (check if already exists)
+        if (!_kernel.Plugins.Contains("CoordinatorTools"))
         {
-            _kernel.Plugins.AddFromObject(coordinatorPlugin, "CoordinatorTools");
-            _logger.LogInformation("CoordinatorPlugin added successfully");
+            var coordinatorPlugin = _serviceProvider?.GetService<CoordinatorPlugin>();
+            if (coordinatorPlugin != null)
+            {
+                _kernel.Plugins.AddFromObject(coordinatorPlugin, "CoordinatorTools");
+                _logger.LogInformation("CoordinatorPlugin added successfully");
+            }
+            else
+            {
+                _logger.LogWarning("CoordinatorPlugin not available - CoordinatorAgent will have limited functionality");
+            }
         }
         else
         {
-            _logger.LogWarning("CoordinatorPlugin not available - CoordinatorAgent will have limited functionality");
+            _logger.LogDebug("CoordinatorTools plugin already registered");
         }
 
         // Enhanced coordinator agent with clear instructions
@@ -95,29 +101,56 @@ public class Orchestrator : IOrchestrator
             Instructions = @"You are the Coordinator for setting up AWS-Azure Sentinel connectors.
 
                 YOUR PRIMARY ROLE:
-                - Guide users through the Sentinel connector setup process
-                - Coordinate between finding, installing, and configuring connectors
-                - Provide clear, step-by-step instructions
-                - Answer questions about both AWS and Azure aspects
-                - Help troubleshoot any issues
+                - Guide users through the complete AWS to Microsoft Sentinel setup process
+                - Ensure steps are executed in the correct order
+                - Coordinate between AWS and Azure configurations
+                - Help users make informed decisions about options
 
                 AVAILABLE TOOLS:
                 - ValidatePrerequisites: Check if all requirements are met
                 - PlanConnectorSetup: Create a detailed setup plan
                 - GenerateSetupReport: Provide a comprehensive report
 
-                PROCESS FLOW:
-                1. Use Azure agent to find available connector solutions
-                2. Present options to the user if multiple solutions exist
-                3. Use Azure agent to install the selected solution
-                4. Guide configuration of data connectors
-                5. Verify successful installation and data flow
+                CORRECT SETUP ORDER (CRITICAL):
+                1. Azure Side:
+                   - Use Azure agent to find AWS connector solutions
+                   - CHECK what's already installed in the workspace
+                   - Present all options to user (installed and available)
+                   - Get user confirmation before installing anything
+                   - Install selected AWS S3 connector from Content Hub
+                   - Get Workspace ID (this is the External ID)
+
+                2. AWS Side (in this exact order):
+                   a. Authentication Setup (SetupAWSAuth):
+                      - Create OIDC provider for Microsoft Sentinel
+                      - Create IAM role with web identity federation
+                      - Attach necessary policies
+
+                   b. Infrastructure Setup (SetupAWSInfra):
+                      - Create S3 bucket with versioning and encryption
+                      - Create SQS queue for notifications
+                      - Configure bucket policies (includes role access)
+                      - Configure SQS policies
+                      - Set up S3 event notifications
+                      - Optionally create CloudTrail (ask user about options)
+
+                3. Final Configuration:
+                   - Provide Role ARN and SQS URL to user
+                   - Guide them to complete Azure portal configuration
+                   - Help verify data ingestion
+
+                KEY DECISIONS TO ASK USER:
+                - Enable CloudTrail? (usually yes for audit logs)
+                - Enable KMS encryption for CloudTrail? (more secure but adds complexity)
+                - Multi-region trail? (recommended for complete visibility)
+                - Organization-wide trail? (if managing multiple AWS accounts)
+                - Enable S3 data events? (for detailed S3 access logging)
 
                 COMMUNICATION STYLE:
-                - Be concise but informative
-                - Use bullet points for clarity
-                - Focus on actionable next steps
-                - Keep responses under 200 words unless more detail is requested",
+                - Be explicit about the order of operations
+                - Explain why each step matters
+                - Ask about options before proceeding
+                - Provide clear next steps",
             Kernel = _kernel,
             Arguments = new KernelArguments(new OpenAIPromptExecutionSettings
             {
@@ -129,17 +162,23 @@ public class Orchestrator : IOrchestrator
 
         _agents["coordinator"] = coordinatorAgent;
 
-        // AZURE AGENT - Add Azure plugin for enhanced functionality
-        var azurePlugin = _serviceProvider?.GetService<AzurePlugin>();
-
-        if (azurePlugin != null)
+        // AZURE AGENT - Add Azure plugin for enhanced functionality (check if already exists)
+        if (!_kernel.Plugins.Contains("AzureTools"))
         {
-            _kernel.Plugins.AddFromObject(azurePlugin, "AzureTools");
-            _logger.LogInformation("AzurePlugin added successfully");
+            var azurePlugin = _serviceProvider?.GetService<AzurePlugin>();
+            if (azurePlugin != null)
+            {
+                _kernel.Plugins.AddFromObject(azurePlugin, "AzureTools");
+                _logger.LogInformation("AzurePlugin added successfully");
+            }
+            else
+            {
+                _logger.LogWarning("AzurePlugin not available - AzureAgent will have limited functionality");
+            }
         }
         else
         {
-            _logger.LogWarning("AzurePlugin not available - AzureAgent will have limited functionality");
+            _logger.LogDebug("AzureTools plugin already registered");
         }
 
         // Enhanced Azure agent with specific responsibilities
@@ -157,13 +196,58 @@ public class Orchestrator : IOrchestrator
                 - Security solution deployment
 
                 AVAILABLE TOOLS:
-                - FindConnectorSolution: Search for available Sentinel connectors
+                - FindConnectorSolution: Search for available Sentinel connectors (also shows installed status)
                 - InstallConnectorSolution: Install solutions from Content Hub into workspaces
 
+                CRITICAL INSTALLATION PROCESS:
+                1. ALWAYS use FindConnectorSolution first to get available options
+                2. PRESENT the full list of solutions found, clearly indicating:
+                   - Which solutions are ALREADY INSTALLED (mark with ✅)
+                   - Which solutions are AVAILABLE but not installed (mark with ⬜)
+                   - Solution name, description, publisher, and version
+                3. If solutions are already installed, INFORM the user first
+                4. ASK the user if they want to install additional solutions
+                5. WAIT for user selection and confirmation
+                6. NEVER automatically install without explicit user approval
+
+                EXAMPLE INTERACTION:
+                User: 'I need to set up AWS connector'
+                You: 'Let me search for available AWS connectors in your workspace...'
+                [Use FindConnectorSolution]
+                You: 'Here's what I found for AWS solutions in your Sentinel workspace:
+
+                **Already Installed:**
+                ✅ 1. Amazon Web Services - by Microsoft (version 3.0.1)
+                   Description: Ingest AWS service logs including CloudTrail, GuardDuty, etc.
+                   Status: INSTALLED and ACTIVE
+
+                **Available for Installation:**
+                ⬜ 2. AWS Security Hub - by Microsoft (version 2.1.0)
+                   Description: Integrate Security Hub findings into Sentinel
+
+                ⬜ 3. AWS GuardDuty - by Microsoft (version 1.5.2)
+                   Description: Ingest GuardDuty threat intelligence alerts
+
+                You already have the main AWS connector installed. Would you like to install any additional AWS solutions?'
+
+                User: 'Install Security Hub'
+                You: 'I'll install the AWS Security Hub solution (version 2.1.0). This will add Security Hub integration capabilities. Please confirm you want to proceed.'
+                User: 'Yes, proceed'
+                [Use InstallConnectorSolution]
+
+                IMPORTANT NOTES:
+                - Always check and report installed solutions first
+                - Help users avoid duplicate installations
+                - Explain what each solution adds if not already installed
+                - Be clear about versions and publishers
+                - If the main solution is installed, suggest complementary ones
+
                 RESPONSE STYLE:
-                - Provide Azure-specific technical details when relevant
-                - Focus on Sentinel and Log Analytics aspects
-                - Keep responses concise and actionable",
+                - Be interactive and informative
+                - Use clear visual indicators (✅ for installed, ⬜ for available)
+                - Present options with numbers for easy reference
+                - Always show installation status upfront
+                - Wait for explicit approval before any installation",
             Kernel = _kernel,
             Arguments = new KernelArguments(new OpenAIPromptExecutionSettings
             {
@@ -175,17 +259,23 @@ public class Orchestrator : IOrchestrator
 
         _agents["azure"] = azureAgent;
 
-        // AWS AGENT - Add AWS plugin for enhanced functionality
-        var awsPlugin = _serviceProvider?.GetService<AWSPlugin>();
-
-        if (awsPlugin != null)
+        // AWS AGENT - Add AWS plugin for enhanced functionality (check if already exists)
+        if (!_kernel.Plugins.Contains("AWSTools"))
         {
-            _kernel.Plugins.AddFromObject(awsPlugin, "AWSTools");
-            _logger.LogInformation("AWSPlugin added successfully");
+            var awsPlugin = _serviceProvider?.GetService<AWSPlugin>();
+            if (awsPlugin != null)
+            {
+                _kernel.Plugins.AddFromObject(awsPlugin, "AWSTools");
+                _logger.LogInformation("AWSPlugin added successfully");
+            }
+            else
+            {
+                _logger.LogWarning("AWSPlugin not available - AWSAgent will have limited functionality");
+            }
         }
         else
         {
-            _logger.LogWarning("AWSPlugin not available - AWSAgent will have limited functionality");
+            _logger.LogDebug("AWSTools plugin already registered");
         }
 
         // Enhanced AWS agent with specific expertise
@@ -196,23 +286,45 @@ public class Orchestrator : IOrchestrator
             Instructions = @"You are an AWS infrastructure specialist for Sentinel integration.
 
                 YOUR EXPERTISE:
-                - AWS CloudTrail configuration for audit logging
-                - S3 bucket setup and policies for log storage
-                - IAM roles and cross-account permissions
-                - SNS/SQS configuration for event streaming
-                - AWS Security Hub integration
+                - OIDC provider configuration for Microsoft Sentinel
+                - IAM roles with web identity federation
+                - AWS CloudTrail configuration with all options
+                - S3 bucket setup with proper policies
+                - SQS configuration for real-time notifications
+                - KMS encryption setup
+                - Organization and multi-region trail configuration
 
                 AVAILABLE TOOLS:
-                - CreateAWSRole: Create IAM roles with trust policies for Microsoft Sentinel
-                - ConfigureS3Bucket: Set up S3 buckets for log collection
-                - SetupSQSQueue: Configure SQS queues for real-time event notifications
-                - GenerateAWSSetupSummary: Provide comprehensive setup summaries
+                - SetupAWSAuth: MUST BE RUN FIRST - Creates OIDC provider and IAM role
+                - SetupAWSInfra: MUST BE RUN SECOND - Creates S3, SQS, and optionally CloudTrail
+                - GenerateAWSSetupSummary: Provides summary after setup
+
+                CRITICAL SETUP ORDER:
+                1. ALWAYS run SetupAWSAuth first to create:
+                   - OIDC identity provider (if not exists)
+                   - IAM role with proper trust relationship
+                   - Attach S3, SQS, and CloudTrail policies
+
+                2. THEN run SetupAWSInfra to create:
+                   - S3 bucket with versioning and optional encryption
+                   - SQS queue with proper settings
+                   - Bucket policy that grants role AND CloudTrail access
+                   - S3 event notifications to SQS
+                   - CloudTrail (if requested) with chosen options
+
+                CLOUDTRAIL OPTIONS TO DISCUSS:
+                - Enable CloudTrail: Usually yes for audit logs
+                - KMS encryption: Adds security but requires KMS key management
+                - Multi-region: Yes for complete AWS visibility
+                - Organization trail: Yes if multiple AWS accounts
+                - Data events: Yes for detailed S3 access logs (can be costly)
+                - Log file validation: Yes for tamper detection
 
                 RESPONSE STYLE:
-                - Focus on AWS-side requirements and configuration
-                - Provide specific IAM policy examples when needed
-                - Help with S3 bucket policies and CloudTrail setup
-                - Keep responses technical but clear",
+                - Always emphasize the correct order of operations
+                - Explain implications of each option
+                - Be clear about what each tool does
+                - Provide Role ARN and Queue URL after completion",
             Kernel = _kernel,
             Arguments = new KernelArguments(new OpenAIPromptExecutionSettings
             {
@@ -263,156 +375,6 @@ public class Orchestrator : IOrchestrator
     {
         // Always use the orchestration to get actual agent responses
         // No more hardcoded responses or quick commands
-        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
-    }
-
-    private UserIntent AnalyzeUserIntent(string message, Domain.Entities.Conversation conversation)
-    {
-        var lowerMessage = message.ToLower();
-
-        // Check for help requests
-        if (lowerMessage.Contains("help") || lowerMessage.Contains("how do i") ||
-            lowerMessage.Contains("what can") || lowerMessage.Contains("guide me"))
-        {
-            return new UserIntent { Type = IntentType.AskForHelp };
-        }
-
-        // Check for status inquiries
-        if (lowerMessage.Contains("status") || lowerMessage.Contains("progress") ||
-            lowerMessage.Contains("where are we") || lowerMessage.Contains("what's done"))
-        {
-            return new UserIntent { Type = IntentType.CheckStatus };
-        }
-
-        // Check for deployment initiation
-        if (lowerMessage.Contains("start") || lowerMessage.Contains("begin") ||
-            lowerMessage.Contains("deploy") || lowerMessage.Contains("set up") ||
-            lowerMessage.Contains("configure sentinel connector"))
-        {
-            return new UserIntent { Type = IntentType.StartDeployment };
-        }
-
-        // Check for AWS-related topics
-        if (lowerMessage.Contains("aws") || lowerMessage.Contains("s3") ||
-            lowerMessage.Contains("iam") || lowerMessage.Contains("sqs") ||
-            lowerMessage.Contains("cloudtrail"))
-        {
-            return new UserIntent { Type = IntentType.AWSConfiguration };
-        }
-
-        // Check for Azure/Sentinel topics
-        if (lowerMessage.Contains("azure") || lowerMessage.Contains("sentinel") ||
-            lowerMessage.Contains("workspace") || lowerMessage.Contains("data connector"))
-        {
-            return new UserIntent { Type = IntentType.AzureConfiguration };
-        }
-
-        // Check for validation requests
-        if (lowerMessage.Contains("validate") || lowerMessage.Contains("verify") ||
-            lowerMessage.Contains("check") || lowerMessage.Contains("test"))
-        {
-            return new UserIntent { Type = IntentType.Validation };
-        }
-
-        // Check for troubleshooting
-        if (lowerMessage.Contains("error") || lowerMessage.Contains("problem") ||
-            lowerMessage.Contains("issue") || lowerMessage.Contains("not working") ||
-            lowerMessage.Contains("failed"))
-        {
-            return new UserIntent { Type = IntentType.Troubleshooting };
-        }
-
-        return new UserIntent { Type = IntentType.GeneralQuestion };
-    }
-
-    private Task<(string Content, string AgentId)> GetConversationalHelpAsync(
-        CancellationToken cancellationToken)
-    {
-        var helpText = "Hello! How can I help you with the Sentinel connector setup today?";
-
-        return Task.FromResult((helpText, "assistant"));
-    }
-
-    private Task<(string Content, string AgentId)> GetConversationalStatusAsync(
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        // Get actual status from deployment tracking
-        var status = GetCurrentDeploymentPhase(sessionId);
-
-        var statusMessage = $@"Let me check where we are in the deployment process...
-
-📍 **Current Status**: {status.Phase}
-
-✅ **Completed Steps**:
-{string.Join("\n", status.CompletedSteps.Select(s => $"   • {s}"))}
-
-⏳ **Next Steps**:
-{string.Join("\n", status.PendingSteps.Take(3).Select(s => $"   • {s}"))}
-
-{GetNextActionSuggestion(status)}
-
-Would you like to continue with the next step?";
-
-        return Task.FromResult((statusMessage, "coordinator"));
-    }
-
-    private async Task<(string Content, string AgentId)> StartConversationalDeploymentAsync(
-        string message,
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        // Use the coordinator-controlled orchestration for deployment
-        return await CoordinatorControlledOrchestrationAsync(
-            "The user wants to start setting up the AWS-Azure Sentinel connector. Begin the deployment process by validating prerequisites and creating a setup plan.",
-            sessionId,
-            cancellationToken);
-    }
-
-    private async Task<(string Content, string AgentId)> HandleAWSConversationAsync(
-        string message,
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        // Route AWS-related queries through the coordinator
-        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
-    }
-
-    private async Task<(string Content, string AgentId)> HandleAzureConversationAsync(
-        string message,
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        // Route Azure-related queries through the coordinator
-        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
-    }
-
-    private async Task<(string Content, string AgentId)> HandleValidationConversationAsync(
-        string message,
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        // Route validation requests through the coordinator
-        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
-    }
-
-    private async Task<(string Content, string AgentId)> HandleTroubleshootingAsync(
-        string message,
-        string sessionId,
-        CancellationToken cancellationToken)
-    {
-        // Route troubleshooting through the coordinator
-        return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
-    }
-
-    private async Task<(string Content, string AgentId)> HandleGeneralConversationAsync(
-        string message,
-        string sessionId,
-        Domain.Entities.Conversation conversation,
-        CancellationToken cancellationToken)
-    {
-        // Use coordinator-controlled orchestration instead of free-form group chat
-        // The coordinator will manage all specialist interactions internally
         return await CoordinatorControlledOrchestrationAsync(message, sessionId, cancellationToken);
     }
 
@@ -565,39 +527,6 @@ Would you like to continue with the next step?";
         public string Phase { get; set; } = "Not Started";
         public List<string> CompletedSteps { get; set; } = new();
         public List<string> PendingSteps { get; set; } = new();
-    }
-
-    private DeploymentPhase GetCurrentDeploymentPhase(string sessionId)
-    {
-        // In production, this would retrieve actual status from storage
-        return new DeploymentPhase
-        {
-            Phase = "Ready to Start",
-            CompletedSteps = new List<string>(),
-            PendingSteps = new List<string>
-            {
-                "Validate prerequisites",
-                "Create AWS resources",
-                "Configure Azure Sentinel",
-                "Verify data flow"
-            }
-        };
-    }
-
-    private string GetNextActionSuggestion(DeploymentPhase status)
-    {
-        if (status.PendingSteps.Count == 0)
-            return "🎉 Great job! Your deployment is complete!";
-
-        var nextStep = status.PendingSteps.FirstOrDefault();
-        return nextStep switch
-        {
-            "Validate prerequisites" => "💡 Ready to validate? Just say 'let's validate the prerequisites' to begin.",
-            "Create AWS resources" => "💡 Shall we set up the AWS side? Say 'let's create the AWS resources' to continue.",
-            "Configure Azure Sentinel" => "💡 Time for Azure! Say 'configure Sentinel' to proceed.",
-            "Verify data flow" => "💡 Final step! Say 'verify everything is working' to test.",
-            _ => "💡 Ready for the next step when you are!"
-        };
     }
 
     private async Task<Domain.Entities.Conversation> GetOrCreateConversationAsync(

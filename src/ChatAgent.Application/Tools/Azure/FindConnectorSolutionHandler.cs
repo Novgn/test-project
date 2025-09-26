@@ -156,7 +156,7 @@ public class FindConnectorSolutionHandler(ILogger<FindConnectorSolutionHandler> 
                                 // Try to match this with our found solutions
                                 foreach (var solution in foundSolutions)
                                 {
-                                    if (solution.DataConnectorKinds.Contains(kindStr))
+                                    if (kindStr != null && solution.DataConnectorKinds.Contains(kindStr))
                                     {
                                         solution.IsInstalled = true;
                                     }

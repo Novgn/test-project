@@ -1,3 +1,4 @@
+/* ARCHIVED - No longer in use
 using Microsoft.AspNetCore.Mvc;
 using ChatAgent.Domain.Interfaces;
 
@@ -51,4 +52,4 @@ public class TestController : ControllerBase
             });
         }
     }
-}
+}*/

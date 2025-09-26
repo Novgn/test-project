@@ -1,3 +1,4 @@
+/* ARCHIVED - No longer in use
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.Agents.Chat;
@@ -937,4 +938,4 @@ public class AgentMessage
     public string Agent { get; set; } = string.Empty;
     public string Content { get; set; } = string.Empty;
     public DateTime Timestamp { get; set; }
-}
+}*/

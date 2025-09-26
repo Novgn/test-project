@@ -1,6 +1,5 @@
 using Microsoft.SemanticKernel;
 using ChatAgent.Application.Orchestration;
-using ChatAgent.Application.Plugins;
 using ChatAgent.Application.Plugins.Azure;
 using ChatAgent.Application.Plugins.AWS;
 using ChatAgent.Application.Plugins.Coordinator;
@@ -102,19 +101,7 @@ builder.Services.AddSingleton(provider =>
         provider);
 });
 
-// Also register the original SentinelConnectorGroupChatOrchestrator if needed
-builder.Services.AddSingleton(provider =>
-{
-    var kernel = provider.GetRequiredService<Kernel>();
-    var logger = provider.GetRequiredService<ILogger<SentinelConnectorGroupChatOrchestrator>>();
-    var conversationRepo = provider.GetRequiredService<IConversationRepository>();
-
-    return new SentinelConnectorGroupChatOrchestrator(
-        kernel,
-        logger,
-        conversationRepo,
-        provider);
-});
+// Removed archived SentinelConnectorGroupChatOrchestrator
 
 // Register Coordinator plugin and handlers
 builder.Services.AddSingleton<ValidatePrerequisitesHandler>();
@@ -173,15 +160,25 @@ builder.Services.AddSingleton<Amazon.SQS.IAmazonSQS>(provider =>
     return new Amazon.SQS.AmazonSQSClient(config);
 });
 
+builder.Services.AddSingleton<Amazon.CloudTrail.IAmazonCloudTrail>(provider =>
+{
+    var config = new Amazon.CloudTrail.AmazonCloudTrailConfig();
+    // Configure region if needed from configuration
+    var region = builder.Configuration["AWS:Region"];
+    if (!string.IsNullOrEmpty(region))
+    {
+        config.RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(region);
+    }
+    return new Amazon.CloudTrail.AmazonCloudTrailClient(config);
+});
+
 // Register AWS plugin and handlers
-builder.Services.AddSingleton<CreateAWSRoleHandler>();
-builder.Services.AddSingleton<ConfigureS3BucketHandler>();
-builder.Services.AddSingleton<SetupSQSQueueHandler>();
+builder.Services.AddSingleton<SetupAWSAuthHandler>();
+builder.Services.AddSingleton<SetupAWSInfraHandler>();
 builder.Services.AddSingleton(provider =>
     new AWSToolHandlers(
-        provider.GetRequiredService<CreateAWSRoleHandler>(),
-        provider.GetRequiredService<ConfigureS3BucketHandler>(),
-        provider.GetRequiredService<SetupSQSQueueHandler>()));
+        provider.GetRequiredService<SetupAWSAuthHandler>(),
+        provider.GetRequiredService<SetupAWSInfraHandler>()));
 builder.Services.AddSingleton<AWSPlugin>();
 
 // Register plugin loggers
@@ -190,8 +187,7 @@ builder.Services.AddSingleton(provider =>
 builder.Services.AddSingleton(provider =>
     provider.GetRequiredService<ILoggerFactory>().CreateLogger<AzurePlugin>());
 
-// Register SimpleGroupChatOrchestrator for testing
-builder.Services.AddSingleton<SimpleGroupChatOrchestrator>();
+// Removed archived SimpleGroupChatOrchestrator
 
 // Register the orchestrator - using the new working Orchestrator
 builder.Services.AddSingleton<IOrchestrator>(provider =>
