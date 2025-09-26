@@ -172,9 +172,12 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
 
             var packageResponse = await _httpClient.GetAsync(packageUrl, cancellationToken);
 
+            _logger.LogInformation("Package API response: {StatusCode} for URL: {Url}", packageResponse.StatusCode, packageUrl);
             if (!packageResponse.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Failed to retrieve package details for {SolutionId}. Trying template approach.", input.SolutionId);
+                var errorContent = await packageResponse.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning("Failed to retrieve package details for {SolutionId}. Status: {StatusCode}, Error: {Error}",
+                    input.SolutionId, packageResponse.StatusCode, errorContent);
 
                 // Try to get the template directly
                 var templateUrl = $"https://management.azure.com/subscriptions/{input.SubscriptionId}" +
@@ -183,6 +186,14 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
                     $"/providers/Microsoft.SecurityInsights/contentProductTemplates/{input.SolutionId}?api-version=2024-09-01";
 
                 packageResponse = await _httpClient.GetAsync(templateUrl, cancellationToken);
+
+                _logger.LogInformation("Template API response: {StatusCode} for URL: {Url}", packageResponse.StatusCode, templateUrl);
+                if (!packageResponse.IsSuccessStatusCode)
+                {
+                    var templateError = await packageResponse.Content.ReadAsStringAsync(cancellationToken);
+                    _logger.LogWarning("Template API also failed. Status: {StatusCode}, Error: {Error}",
+                        packageResponse.StatusCode, templateError);
+                }
             }
 
             if (!packageResponse.IsSuccessStatusCode)
@@ -199,12 +210,80 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
             }
 
             var packageContent = await packageResponse.Content.ReadAsStringAsync(cancellationToken);
+
+            // Log the first 500 characters of the response for debugging
+            _logger.LogDebug("Package response content (first 500 chars): {Content}",
+                packageContent.Length > 500 ? packageContent.Substring(0, 500) : packageContent);
+
             var packageData = JsonDocument.Parse(packageContent);
+
+            // Check if the solution is already installed
+            if (packageData.RootElement.TryGetProperty("properties", out var packageProps))
+            {
+                // Check installation status
+                if (packageProps.TryGetProperty("isInstalled", out var installedElement) &&
+                    installedElement.GetBoolean())
+                {
+                    _logger.LogInformation("Solution {SolutionId} is already installed", input.SolutionId);
+
+                    // Get installed version and other details
+                    string installedVersion = "Unknown";
+                    if (packageProps.TryGetProperty("installedVersion", out var versionElement))
+                    {
+                        installedVersion = versionElement.GetString() ?? "Unknown";
+                    }
+
+                    // Get content items if available
+                    if (packageProps.TryGetProperty("contentItems", out var items))
+                    {
+                        foreach (var item in items.EnumerateArray())
+                        {
+                            if (item.TryGetProperty("contentKind", out var kind) &&
+                                item.TryGetProperty("displayName", out var name))
+                            {
+                                var component = $"{kind.GetString()}: {name.GetString()}";
+                                installedComponents.Add(component);
+
+                                // Track data connectors
+                                if (kind.GetString()?.Equals("DataConnector", StringComparison.OrdinalIgnoreCase) == true)
+                                {
+                                    enabledDataConnectors.Add(name.GetString() ?? "Unknown");
+                                }
+                            }
+                        }
+                    }
+
+                    return new InstallConnectorSolution.Output(
+                        Success: true,
+                        OperationId: string.Empty,
+                        Status: "AlreadyInstalled",
+                        Message: $@"Solution {input.SolutionId} (v{installedVersion}) is already installed in the workspace.
+
+Next steps to configure the AWS data connector:
+1. Navigate to Microsoft Sentinel → Data Connectors
+2. Search for 'AWS' or 'Amazon Web Services S3'
+3. Click on the connector to open its configuration page
+4. Follow the setup wizard to configure:
+   - AWS Role ARN (needs to be created in AWS)
+   - S3 Bucket and SQS Queue settings
+   - Log types to ingest (e.g., CloudTrail, VPC Flow Logs, GuardDuty)",
+                        InstalledComponents: installedComponents,
+                        EnabledDataConnectors: enabledDataConnectors,
+                        ConfigurationRequired: new Dictionary<string, string>
+                        {
+                            ["AWS Role ARN"] = "Required - create via AWS setup script",
+                            ["S3 Bucket"] = "Required - for log storage",
+                            ["SQS Queue URL"] = "Required - for event notifications",
+                            ["Destination Table"] = "AWSCloudTrail (for CloudTrail logs)"
+                        }
+                    );
+                }
+            }
 
             // 6. Extract the mainTemplate from the package
             string? mainTemplate = null;
-            if (packageData.RootElement.TryGetProperty("properties", out var packageProps) &&
-                packageProps.TryGetProperty("mainTemplate", out var templateElement))
+            if (packageData.RootElement.TryGetProperty("properties", out var packageProps2) &&
+                packageProps2.TryGetProperty("mainTemplate", out var templateElement))
             {
                 mainTemplate = templateElement.GetRawText();
             }
@@ -214,6 +293,7 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
                 _logger.LogWarning("No mainTemplate found in package response. Attempting Content Hub installation approach.");
 
                 // Try to install via Content Hub API directly
+                // First, try with the solution ID as-is
                 var installUrl = $"https://management.azure.com/subscriptions/{input.SubscriptionId}" +
                     $"/resourceGroups/{input.ResourceGroupName}" +
                     $"/providers/Microsoft.OperationalInsights/workspaces/{input.WorkspaceName}" +
@@ -223,9 +303,38 @@ public class InstallConnectorSolutionHandler(ILogger<InstallConnectorSolutionHan
                 var installRequest = new HttpRequestMessage(HttpMethod.Post, installUrl);
                 installRequest.Headers.Authorization = _httpClient.DefaultRequestHeaders.Authorization;
 
+                // Add Content-Type header for the POST request
+                installRequest.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+
                 var installResponse = await _httpClient.SendAsync(installRequest, cancellationToken);
 
-                if (installResponse.IsSuccessStatusCode)
+                _logger.LogInformation("Content Hub install API response: {StatusCode} for URL: {Url}",
+                    installResponse.StatusCode, installUrl);
+
+                // If the first attempt fails with NotFound, try alternative solution ID formats
+                if (installResponse.StatusCode == System.Net.HttpStatusCode.NotFound &&
+                    input.SolutionId.Contains("azuresentinel.azure-sentinel-solution-"))
+                {
+                    _logger.LogInformation("Trying alternative solution ID format");
+
+                    // Try with just the last part of the solution ID
+                    var alternativeId = input.SolutionId.Replace("azuresentinel.azure-sentinel-solution-", "");
+                    installUrl = $"https://management.azure.com/subscriptions/{input.SubscriptionId}" +
+                        $"/resourceGroups/{input.ResourceGroupName}" +
+                        $"/providers/Microsoft.OperationalInsights/workspaces/{input.WorkspaceName}" +
+                        $"/providers/Microsoft.SecurityInsights/contentProductPackages/{alternativeId}" +
+                        $"/install?api-version=2024-09-01";
+
+                    installRequest = new HttpRequestMessage(HttpMethod.Post, installUrl);
+                    installRequest.Headers.Authorization = _httpClient.DefaultRequestHeaders.Authorization;
+                    installRequest.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+
+                    installResponse = await _httpClient.SendAsync(installRequest, cancellationToken);
+                    _logger.LogInformation("Alternative format response: {StatusCode}", installResponse.StatusCode);
+                }
+
+                if (installResponse.IsSuccessStatusCode ||
+                    installResponse.StatusCode == System.Net.HttpStatusCode.Accepted)
                 {
                     _logger.LogInformation("Solution installation initiated via Content Hub for {SolutionId}", input.SolutionId);
 
@@ -257,22 +366,34 @@ Please follow these steps to complete the setup:
                 else
                 {
                     var errorContent = await installResponse.Content.ReadAsStringAsync(cancellationToken);
-                    _logger.LogError("Failed to install via Content Hub: {Error}", errorContent);
+                    _logger.LogError("Failed to install via Content Hub. Status: {StatusCode}, Error: {Error}",
+                        installResponse.StatusCode, errorContent);
+
+                    // Check if it's a specific error we can provide guidance for
+                    var errorMessage = "Unable to install this solution programmatically.";
+                    if (errorContent.Contains("already installed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        errorMessage = "This solution appears to be already installed.";
+                    }
+                    else if (installResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    {
+                        errorMessage = "Solution not found in Content Hub. It may require a different ID or manual installation.";
+                    }
 
                     return new InstallConnectorSolution.Output(
                         Success: false,
                         OperationId: string.Empty,
                         Status: "ManualInstallationRequired",
-                        Message: $@"Unable to install this solution programmatically.
+                        Message: $@"{errorMessage}
 
 Please install manually through the Azure Portal:
 1. Navigate to Microsoft Sentinel → Content Hub
-2. Search for '{input.SolutionId}'
+2. Search for 'Amazon Web Services' or 'AWS'
 3. Click on the solution and select 'Install'
 4. Follow the installation wizard
 5. Once installed, return here to continue with AWS configuration
 
-Error details: {installResponse.StatusCode}",
+Error details: {installResponse.StatusCode} - {errorContent}",
                         InstalledComponents: installedComponents,
                         EnabledDataConnectors: enabledDataConnectors,
                         ConfigurationRequired: null
